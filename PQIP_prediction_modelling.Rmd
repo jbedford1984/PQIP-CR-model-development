@@ -1,0 +1,1569 @@
+---
+title: "PQIP morbidity risk prediction modelling"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE, echo=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+setwd("~/Documents/Work/Research/Postoperative-morbidity-model-development-PQIP-2022")
+```
+
+## Data export
+
+Data were exported from the central PQIP database on 9th April 2021.
+
+```{r, echo=FALSE, include=FALSE, warning=FALSE}
+## Load packages required for analysis
+source("./source files/packages.R")
+source("./source files/bootstepAIC.R")
+source("./source files/validation.R")
+source("./source files/ModelAnalysisFunctions.R")
+
+## Load data
+export_data <- read.csv(file = "./data/data_export.csv", 
+                     na.strings = c("", "NA", "-9999", "NULL"))
+
+admission_data <- read.csv(file = "./data/admission.csv", 
+                     na.strings = c("", "NA", "-9999", "NULL")) %>%
+  select(ReferenceCode, Locked, 
+         S14LookAfterPersonalToiletHygieneUnaided,S14AbleToBreatheEasily,
+         S14WorkOrUndertakeUsualHomeActivities, 
+         EQ5D01Mobility, EQ5D02Selfcare, EQ5D03UsualActivities,
+         S15StandingForLongPeriodsSuchAs30Minutes,S15TakingCareOfHouseholdResponsibilities,
+         S15HowMuchProblemJoiningCommunityActivitiesInTheSameWayAsAnyoneElseCan,
+         S15WalkingALongDistanceSuchAsAKilometreOrEquivalent, S15WashingYourWholeBody,
+         S15GettingDressed) %>%
+  filter(Locked == "True") %>% select(-Locked)
+
+export_data <- left_join(export_data, admission_data, by = c("CaseId" = "ReferenceCode"))
+
+# run initial data cleaning script
+# Clean date format, procedure codes, severity of procedure, remove test data
+# Filter to locked records only
+source("./source files/data cleaning.R")
+source("./source files/data_cleaning_2.R")
+```
+
+```{r}
+## total number of cases in data export
+n_total_export
+
+## number of locked cases in export
+n_locked
+
+## number who underwent surgery on or before 30th March 2020
+n_eligble_date
+
+## number of eligible colorectal cases based on date of surgery and surgical specialty
+n_colorectal_eligible
+
+# merge LSOA to dataframe
+
+## link IMD quintile to LSOA based on corrected quintiles (Abel et al 2016, BMJ Open)
+# https://doi.org/10.5523/bris.1ef3q32gybk001v77c1ifmty7x
+LSOA_linkage <- read_csv("data/LSOA_linkage_JB_25082021.csv") 
+
+LSOA_linkage <- LSOA_linkage %>% 
+  select(CaseId, lsoa11cd) %>%
+  mutate(lsoa11cd = factor(lsoa11cd))
+
+export_data <- left_join(export_data, LSOA_linkage, by = "CaseId")
+
+source("./source files/IMD_2019.R")
+
+export_data <- left_join(export_data, IMD_adjusted, by = c("lsoa11cd" = "LSOA_code")) %>%
+  mutate(IMD_quintile_adjusted = factor(IMD_quintile_adjusted))
+
+```
+
+## Predictor variable exploration
+
+## Age
+
+```{r}
+Desc(export_data$S01AgeYears)
+```
+
+### Sex
+
+```{r}
+Desc(export_data$S01Gender)
+
+## convert gender to factor
+export_data <- export_data %>% mutate(S01Gender = factor(S01Gender))
+```
+
+### BMI
+
+```{r}
+Desc(export_data$S01BMI)
+```
+
+We can see that ther are extreme outliers in the BMI data. We will explore this in more detail by plotting height against weight.
+
+```{r}
+ggplot(export_data, aes(x=S01Weight,y=S01Height)) +
+  geom_point() +
+  theme_cowplot()
+```
+
+We will explore all cases with BMI \<15kg/m2 and \>50kg/m2 to see if there is an obvious error with height/weight being entered into the incorrect field.
+
+```{r}
+export_data %>% filter(S01BMI <= 12 | S01BMI >= 50) %>% select(CaseId, S01Height, S01Weight, S01BMI) %>% arrange(CaseId)
+```
+
+We can see that some cases have the height and weight entered into the opposite field. We will correct these now. We will place a cut off of BMI \>60 and \<12, and change these data to NA for now. They will be imputed later.
+
+```{r}
+source("./source files/BMI_correction.R")
+
+export_data$S01Height[export_data$CaseId %in% BMI_CaseId] <- BMI_height
+export_data$S01Weight[export_data$CaseId %in% BMI_CaseId] <- BMI_weight
+export_data$S01BMI[export_data$CaseId %in% BMI_CaseId] <- export_data$S01Weight[export_data$CaseId %in% BMI_CaseId]/((export_data$S01Height[export_data$CaseId %in% BMI_CaseId]/100)^2)
+
+# set BMI <12 and >60 to NA
+BMI_remove <- nrow(export_data %>% filter(S01BMI >60 | S01BMI < 12) %>% select(CaseId, S01Height, S01Weight, S01BMI))
+
+
+
+export_data <- export_data %>% mutate(S01BMI = ifelse(S01BMI >60, NA,
+                                                      ifelse(S01BMI <12, NA,
+                                                             S01BMI)))
+
+Desc(export_data$S01BMI)
+summary(export_data$S01BMI)
+```
+
+### Severity of procedure - actual procedure performed
+
+```{r}
+Desc(export_data$SORT_severity)
+
+export_data <- export_data %>% mutate(SORT_severity.combined = dplyr::recode_factor(SORT_severity,
+                                                                             `Min`="Min/Int/Maj",
+                                                                             `Int`="Min/Int/Maj",
+                                                                             `Maj`="Min/Int/Maj"))
+
+Desc(export_data$SORT_severity.combined)
+```
+
+### Mode of surgery - actual mode performed
+
+If the procedure was converted to open, then it would be considered as open here.
+
+```{r}
+# Let's create a combined category for this variable - we will also combine laparoscopic/thoracoscopic into one variable
+
+Desc(export_data$S03ActualProcedureSurgeryMode)
+Desc(export_data$S02PlannedProcedureSurgeryModeLaparoscopic)
+table(export_data$S03WasProcedureTheSameAsThePlannedProcedure, export_data$S03ActualProcedureSurgeryMode)
+table(export_data$S02PlannedProcedureSurgeryModeOpen, export_data$S02PlannedProcedureSurgeryModeLaparoscopic)
+table(export_data$S02PlannedProcedureSurgeryModeLaparoscopic, export_data$S02PlannedProcedureSurgeryModeRobotic)
+table(export_data$S02PlannedProcedureSurgeryModeRobotic, export_data$S02PlannedProcedureSurgeryModeThoracoscopic)
+table(export_data$S03WasProcedureTheSameAsThePlannedProcedure, export_data$S02PlannedProcedureSurgeryModeThoracoscopic)
+
+# create variable that includes actual mode of surgery
+export_data <- export_data %>%
+  mutate(S02PlannedProcedureSurgeryModeThoracoscopic = replace_na(S02PlannedProcedureSurgeryModeThoracoscopic,2)) %>%
+  mutate(ModeSurgery = ifelse(S03WasProcedureTheSameAsThePlannedProcedure == "Y" & S02PlannedProcedureSurgeryModeOpen==1 &
+                              S02PlannedProcedureSurgeryModeLaparoscopic==2 & S02PlannedProcedureSurgeryModeRobotic==2 &
+                              S02PlannedProcedureSurgeryModeThoracoscopic==2,"Opn",
+                       ifelse(S03WasProcedureTheSameAsThePlannedProcedure == "Y" & S02PlannedProcedureSurgeryModeOpen==1
+                                     & S02PlannedProcedureSurgeryModeLaparoscopic==1 & S02PlannedProcedureSurgeryModeRobotic==2
+                                     & S02PlannedProcedureSurgeryModeThoracoscopic==2,"OpnLap",
+                       ifelse(S03WasProcedureTheSameAsThePlannedProcedure == "Y" & S02PlannedProcedureSurgeryModeOpen==1 &
+                              S02PlannedProcedureSurgeryModeLaparoscopic==2 & S02PlannedProcedureSurgeryModeRobotic==1 &
+                              S02PlannedProcedureSurgeryModeThoracoscopic==2,"OpnRob",
+                       ifelse(S03WasProcedureTheSameAsThePlannedProcedure == "Y" & S02PlannedProcedureSurgeryModeOpen==1 &
+                              S02PlannedProcedureSurgeryModeLaparoscopic==2 & S02PlannedProcedureSurgeryModeRobotic==2 &
+                              S02PlannedProcedureSurgeryModeThoracoscopic==1,"OpnTho",
+                       ifelse(S03WasProcedureTheSameAsThePlannedProcedure == "Y" & S02PlannedProcedureSurgeryModeOpen==2 &
+                                              S02PlannedProcedureSurgeryModeLaparoscopic==1 &
+                                S02PlannedProcedureSurgeryModeRobotic==2 &
+                                S02PlannedProcedureSurgeryModeThoracoscopic==2,"Lap", 
+                       ifelse(S03WasProcedureTheSameAsThePlannedProcedure == "Y" & S02PlannedProcedureSurgeryModeOpen==2 &
+                              S02PlannedProcedureSurgeryModeLaparoscopic==1 & S02PlannedProcedureSurgeryModeRobotic==1 &
+                              S02PlannedProcedureSurgeryModeThoracoscopic==2,"LapRob",
+                       ifelse(S03WasProcedureTheSameAsThePlannedProcedure == "Y" & S02PlannedProcedureSurgeryModeOpen==2 &
+                              S02PlannedProcedureSurgeryModeLaparoscopic==1 & S02PlannedProcedureSurgeryModeRobotic==2 &
+                              S02PlannedProcedureSurgeryModeThoracoscopic==1,"LapTho",
+                       ifelse(S03WasProcedureTheSameAsThePlannedProcedure == "Y" & S02PlannedProcedureSurgeryModeOpen==2 &
+                              S02PlannedProcedureSurgeryModeLaparoscopic==2 & S02PlannedProcedureSurgeryModeRobotic==1 &
+                              S02PlannedProcedureSurgeryModeThoracoscopic==2,"Rob",
+                       ifelse(S03WasProcedureTheSameAsThePlannedProcedure == "Y" & S02PlannedProcedureSurgeryModeOpen==2 &
+                              S02PlannedProcedureSurgeryModeLaparoscopic==2 & S02PlannedProcedureSurgeryModeRobotic==1 &
+                              S02PlannedProcedureSurgeryModeThoracoscopic==1,"RobTho",
+                       ifelse(S03WasProcedureTheSameAsThePlannedProcedure == "Y" & S02PlannedProcedureSurgeryModeOpen==2 &
+                              S02PlannedProcedureSurgeryModeLaparoscopic==2 & S02PlannedProcedureSurgeryModeRobotic==2 &
+                              S02PlannedProcedureSurgeryModeThoracoscopic==1,"Tho",
+                       ifelse(S03WasProcedureTheSameAsThePlannedProcedure == "Y" & S02PlannedProcedureSurgeryModeOpen==1 &
+                              S02PlannedProcedureSurgeryModeLaparoscopic==1 & S02PlannedProcedureSurgeryModeRobotic==1 &
+                              S02PlannedProcedureSurgeryModeThoracoscopic==2,"OpnLapRob",
+                       ifelse(S03WasProcedureTheSameAsThePlannedProcedure == "Y" & S02PlannedProcedureSurgeryModeOpen==1 &
+                              S02PlannedProcedureSurgeryModeLaparoscopic==1 & S02PlannedProcedureSurgeryModeRobotic==2 &
+                              S02PlannedProcedureSurgeryModeThoracoscopic==1,"OpnLapTho",
+                       ifelse(S03WasProcedureTheSameAsThePlannedProcedure == "Y" & S02PlannedProcedureSurgeryModeOpen==2 &
+                              S02PlannedProcedureSurgeryModeLaparoscopic==1 & S02PlannedProcedureSurgeryModeRobotic==1 &
+                              S02PlannedProcedureSurgeryModeThoracoscopic==1,"LapRobTho",
+                              NA)))))))))))))) %>%
+  mutate(ModeSurgery = ifelse(S03WasProcedureTheSameAsThePlannedProcedure == "N", 
+                              S03ActualProcedureSurgeryMode, ModeSurgery)) %>%
+  mutate(ModeSurgery = ifelse(is.na(ModeSurgery) & S02PlannedProcedureSurgeryModeOpen==1 &
+                              S02PlannedProcedureSurgeryModeLaparoscopic==2 & S02PlannedProcedureSurgeryModeRobotic==2 &
+                              S02PlannedProcedureSurgeryModeThoracoscopic==2,"Opn",
+                       ifelse(is.na(ModeSurgery) & S02PlannedProcedureSurgeryModeOpen==1
+                                     & S02PlannedProcedureSurgeryModeLaparoscopic==1 & S02PlannedProcedureSurgeryModeRobotic==2
+                                     & S02PlannedProcedureSurgeryModeThoracoscopic==2,"OpnLap",
+                       ifelse(is.na(ModeSurgery) & S02PlannedProcedureSurgeryModeOpen==2 &
+                                              S02PlannedProcedureSurgeryModeLaparoscopic==1 &
+                                S02PlannedProcedureSurgeryModeRobotic==2 &
+                                S02PlannedProcedureSurgeryModeThoracoscopic==2,"Lap",
+                       ifelse(is.na(ModeSurgery) & S02PlannedProcedureSurgeryModeOpen==2 &
+                              S02PlannedProcedureSurgeryModeLaparoscopic==2 & S02PlannedProcedureSurgeryModeRobotic==1 &
+                              S02PlannedProcedureSurgeryModeThoracoscopic==2,"Rob", ModeSurgery))))) %>%
+  mutate(ModeSurgeryCombined = factor(recode(ModeSurgery,
+                                      `Lap`="Lap",
+                                      `Tho`="Lap",
+                                      `LapRob`="Rob",
+                                      `OpnLap`="Opn",
+                                      `OpnLapRob`="Opn",
+                                      `OpnRob`="Opn")))
+
+
+Desc(export_data$ModeSurgeryCombined)
+```
+
+Based on this coding, where multiple modes of surgery have been selected we have applied the following hierachy: Open \> Robotic \> Laparoscopic
+
+### NCEPOD classification of surgery
+
+```{r}
+Desc(export_data$S02UrgencyOfSurgery)
+
+export_data$S02UrgencyOfSurgery <- factor(export_data$S02UrgencyOfSurgery)
+```
+
+```{r}
+export_data <- export_data %>% select(-S02PlannedProcedureSurgeryMultiStageProcedure, -S02PlannedProcedureSurgeryMultiStageProcedureDate)
+```
+
+### Cancer diagnosis
+
+```{r}
+Desc(export_data$S02PatientHasDiagnosisOfCancerCurrentOrLessThan5YearsNo)
+Desc(export_data$S02PatientHasDiagnosisOfCancerCurrentOrLessThan5YearsYesSolidLocal)
+Desc(export_data$S02PatientHasDiagnosisOfCancerCurrentOrLessThan5YearsYesSolidMeta)
+Desc(export_data$S02PatientHasDiagnosisOfCancerCurrentOrLessThan5YearsYesLeukaemia)
+Desc(export_data$S02PatientHasDiagnosisOfCancerCurrentOrLessThan5YearsYesLymphoma)
+
+## We will combine these variables into one.
+
+export_data <- export_data %>%
+  mutate(CancerDiagnosis = ifelse(S02PatientHasDiagnosisOfCancerCurrentOrLessThan5YearsYesSolidMeta==1 |
+                                    S02PatientHasDiagnosisOfCancerCurrentOrLessThan5YearsYesLeukaemia==1 |
+                                    S02PatientHasDiagnosisOfCancerCurrentOrLessThan5YearsYesLymphoma==1 | S02PatientHasDiagnosisOfCancerCurrentOrLessThan5YearsYesSolidLocal==1,
+                                         "Cancer diagnosis","No cancer")) %>%
+  mutate(CancerDiagnosis = factor(CancerDiagnosis))
+
+Desc(export_data$CancerDiagnosis)
+```
+
+### Serum Sodium
+
+```{r}
+Desc(export_data$S02SerumSodium)
+
+Na_remove <- nrow(export_data %>% filter(S02SerumSodium > 160))
+export_data$S02SerumSodium[export_data$S02SerumSodium > 160] <- NA 
+```
+
+### Serum Potassium
+
+```{r}
+Desc(export_data$S02SerumPotassium)
+
+## we will set any potassium level >6.5mmol/L to NA as these patients to NA
+K_remove <- nrow(export_data %>% filter(S02SerumPotassium >= 6.5))
+
+export_data$S02SerumPotassium[export_data$S02SerumPotassium >= 6.5] <- NA
+```
+
+### Serum Urea
+
+```{r}
+Desc(export_data$S02SerumUrea)
+
+ggplot(export_data, aes(S02SerumUrea, S02SerumCreatinine)) +
+  geom_point()
+
+
+# we can see the plot shows significant outliers with normal creatinine level but urea >40umol/L. We will set these values to NA and impute them late
+Urea_remove <- nrow(export_data %>% filter(S02SerumUrea > 40))
+
+export_data$S02SerumUrea[export_data$S02SerumUrea > 40] <- NA
+
+export_data$log.Urea <- log(export_data$S02SerumUrea)
+```
+
+### Serum Creatinine
+
+```{r}
+Desc(export_data$S02SerumCreatinine)
+
+export_data <- export_data %>% mutate(log.Creatinine = log(S02SerumCreatinine))
+```
+
+### Serum Troponin
+
+```{r}
+Desc(export_data$S02SerumTroponin)
+
+# The missingness in the Troponin variable is almost 100% therefore we will remove this as a candidate variable
+
+export_data <- export_data %>% select(-S02SerumTroponin, -S02SerumTroponin_NK)
+```
+
+### Serum Albumin
+
+```{r}
+Desc(export_data$S02SerumAlbumin)
+```
+
+### White cell count
+
+```{r}
+Desc(export_data$S02WhiteCellCount)
+
+ggplot(export_data, aes(S02WhiteCellCount)) +
+  geom_bar()
+
+
+
+export_data %>% filter(S02WhiteCellCount >37.5) %>% select(S02PatientHasDiagnosisOfCancerCurrentOrLessThan5YearsYesLeukaemia,
+                                                           S02PatientHasDiagnosisOfCancerCurrentOrLessThan5YearsYesLymphoma, CaseId)
+
+## we can see that none of these patients were diagnosed with either Leukaemia or lymphoma (a cause of significantly elevated WCC). We will therefore set these values to NA and impute based on physiological plausibility
+
+WCC_remove <- nrow(export_data %>% filter(S02WhiteCellCount > 40))
+export_data$S02WhiteCellCount[export_data$S02WhiteCellCount >40] <- NA
+```
+
+### Haemoglobin
+
+```{r}
+Desc(export_data$S02Haemoglobin)
+
+ggplot(export_data, aes(S02Haemoglobin)) +
+  geom_bar()
+
+Hb_remove <- nrow(export_data %>% filter(S02Haemoglobin < 7.0))
+export_data$S02Haemoglobin[export_data$S02Haemoglobin < 7.0] <- NA
+```
+
+### Pulse Rate
+
+```{r}
+Desc(export_data$S02PulseRate)
+
+ggplot(export_data, aes(S02PulseRate)) +
+  geom_bar()
+
+# We will remove all values >150 on the basis that these patients would not go on to have elective surgery
+
+HR_remove <- nrow(export_data %>% filter(S02PulseRate > 150))
+export_data$S02PulseRate[export_data$S02PulseRate > 150] <- NA
+```
+
+### Systolic BP
+
+```{r}
+Desc(export_data$S02SystolicBP)
+
+ggplot(export_data, aes(S02SystolicBP)) +
+  geom_bar()
+
+# We will remove all values >200 and <70mmHg on the basis that these patients would not go on to have elective surgery
+
+BP_remove <- nrow(export_data %>% filter(S02SystolicBP > 250 | S02SystolicBP < 70))
+
+export_data$S02SystolicBP[export_data$S02SystolicBP > 250] <- NA
+export_data$S02SystolicBP[export_data$S02SystolicBP < 70] <- NA
+```
+
+### GCS
+
+```{r}
+Desc(export_data$S02GlasgowComaScaleTotal)
+
+ggplot(export_data, aes(S02GlasgowComaScaleTotal)) +
+  geom_bar()
+
+# We will remove GCS as a candidate variable given the lack of variation (100% GCS 15)
+#export_data <- export_data %>% select(-S02GlasgowComaScaleTotal)
+
+```
+
+### Oxygen saturations
+
+```{r}
+Desc(export_data$S02SpO2)
+
+ggplot(export_data, aes(S02SpO2)) +
+  geom_bar()
+
+O2sats_remove <- nrow(export_data %>% filter(S02SpO2 < 85))
+
+export_data$S02SpO2[export_data$S02SpO2 < 85] <- NA
+```
+
+### ECG findings
+
+```{r}
+Desc(export_data$S02ECGFindings)
+
+export_data$S02ECGFindings <- factor(export_data$S02ECGFindings)
+```
+
+### Cardiac history findings
+
+```{r}
+Desc(export_data$S02CardiacHistoryFindings)
+
+# we will combine P and R groups
+export_data$S02CardiacHistoryFindings.combined = dplyr::recode_factor(export_data$S02CardiacHistoryFindings,
+                                                                    `P`="P/R",`R`="P/R")
+
+Desc(export_data$S02CardiacHistoryFindings.combined)
+```
+
+### NYHA classification
+
+```{r}
+Desc(export_data$S02NYHAHeartFailureClassification)
+
+# we will combine III and IV groups
+export_data$S02NYHAHeartFailureClassification.combined = dplyr::recode_factor(export_data$S02NYHAHeartFailureClassification,
+                                                                    `III`="III/IV",`IV`="III/IV")
+
+Desc(export_data$S02NYHAHeartFailureClassification.combined)
+
+```
+
+### Respiratory history findings
+
+```{r}
+Desc(export_data$S02RespiratoryHistoryFindings)
+
+# we will combine DLE and DAR groups
+export_data$S02RespiratoryHistoryFindings.combined = dplyr::recode_factor(export_data$S02RespiratoryHistoryFindings,
+                                                                    `DLE`="DLE/DAR",`DAR`="DLE/DAR")
+Desc(export_data$S02RespiratoryHistoryFindings.combined)
+```
+
+### Respiratory infection in last month
+
+```{r}
+Desc(export_data$S02PatientHadRespiratoryInfectionInTheLastMonth)
+
+export_data$S02PatientHadRespiratoryInfectionInTheLastMonth <- factor(export_data$S02PatientHadRespiratoryInfectionInTheLastMonth)
+```
+
+### History of CVA
+
+```{r}
+Desc(export_data$S02PatientHasHistoryOfCerebrovascularDisease)
+
+export_data$S02PatientHasHistoryOfCerebrovascularDisease.combined = dplyr::recode_factor(export_data$S02PatientHasHistoryOfCerebrovascularDisease,
+                                                                              `YNH`="YNH/YWH",
+                                                                              `YWH`="YNH/YWH")
+Desc(export_data$S02PatientHasHistoryOfCerebrovascularDisease.combined)
+```
+
+### Dementia
+
+```{r}
+Desc(export_data$S02PatientHasDementia)
+
+export_data$S02PatientHasDementia <- factor(export_data$S02PatientHasDementia)
+```
+
+### Diabetes
+
+```{r}
+Desc(export_data$S02PatientHasDiabetes)
+
+export_data <- export_data %>% mutate(Diabetes = recode_factor(S02PatientHasDiabetes,
+                                                        `2` = "N",
+                                                        `T1` = "Y",
+                                                        `T2I` = "Y",
+                                                        `1` = "Y",
+                                                        `T2D` = "Y",
+                                                        `T2N` = "Y"))
+
+Desc(export_data$Diabetes)
+
+Desc(export_data %>% filter(Diabetes == "Y") %>% select(S02HbA1c))
+
+## Remove HbA1c >20
+HbA1c_remove <- nrow(export_data %>% filter(S02HbA1c > 20))
+export_data$S02HbA1c[export_data$S02HbA1c >20] <- NA
+```
+
+### Liver disease
+
+```{r}
+Desc(export_data$S02PatientHasLiverDisease)
+
+# we will combine YWO and YW into one group as <1% on both groups
+export_data$S02PatientHasLiverDisease.combined = dplyr::recode_factor(export_data$S02PatientHasLiverDisease,
+                                                           `YWO`="Y", `YW`="Y")
+Desc(export_data$S02PatientHasLiverDisease.combined)
+
+Desc(export_data$S02PatientHasLiverDiseaseChildPughGrade)
+Desc(export_data$S02PatientHasLiverDiseaseType)
+
+# We will remove Child's Pugh variable and Liver disease type due to missingness >95%
+export_data <- export_data %>% select(-S02PatientHasLiverDiseaseChildPughGrade, -S02PatientHasLiverDiseaseType)
+```
+
+### ASA category
+
+```{r}
+Desc(export_data$S02PatientsASAGrade)
+
+# we will combine ASA IV and ASA V groups as there are fewer than 1% cases in ASA V category
+export_data <- export_data %>% mutate(S02PatientsASAGrade.combined = dplyr::recode(export_data$S02PatientsASAGrade, 
+                                                       `IV`="IV/V",`V`="IV/V"))
+Desc(export_data$S02PatientsASAGrade.combined)
+
+```
+
+### Smoking history
+
+```{r}
+Desc(export_data$S02PatientsSmokingHistory)
+
+# we will convery "not known" to NA and impute later
+export_data$S02PatientsSmokingHistory[export_data$S02PatientsSmokingHistory == "NK"] <- NA
+
+export_data$S02PatientsSmokingHistory <- factor(export_data$S02PatientsSmokingHistory)
+```
+
+### Operations in last 30 days
+
+```{r}
+Desc(export_data$S03HowManyOperationsInPast30Days)
+
+export_data$S03HowManyOperationsInPast30Days <- factor(export_data$S03HowManyOperationsInPast30Days)
+
+# we will combine categories "2" and "G2" into one
+export_data$S03HowManyOperationsInPast30Days.combined = dplyr::recode_factor(export_data$S03HowManyOperationsInPast30Days,
+                                                                           `2`="2ormore",`G2`="2ormore")
+export_data$S03HowManyOperationsInPast30Days.combined = factor(export_data$S03HowManyOperationsInPast30Days.combined,
+                                                             ordered = FALSE)
+
+Desc(export_data$S03HowManyOperationsInPast30Days.combined)
+```
+
+### Clinical frailty scale
+
+```{r}
+Desc(export_data$S02RockwoodClinicalFrailtyScore)
+
+## We will exclude owing to missing data (55.7% missing)
+
+export_data <- export_data %>% 
+  mutate(Rockwood.combined = dplyr::recode(S02RockwoodClinicalFrailtyScore,
+                                                  `1`='1',
+                                                  `2`='2',
+                                                  `3`='3',
+                                                  `4`='4',
+                                                  `5`='5',
+                                                  `6`='6-9',
+                                                  `7`='6-9',
+                                                  `8`='6-9',
+                                                  `9`='6-9',
+                                                  `ND`='ND')) %>%
+  mutate(Rockwood.combined = ifelse(Rockwood.combined != "ND", Rockwood.combined, NA),
+         Rockwood.combined = factor(Rockwood.combined))
+
+```
+
+## Full morbidity prediction model
+
+The following variables are suitable for consideration of entry into the model:
+
+1.  Sex    
+2.  Age (years)    
+3.  ASA grade     
+4.  Severity of surgery     
+5.  Mode of surgery     
+6.  Urgency of surgery     
+7.  BMI    
+8.  Serum sodium    
+9.  Serum potassium    
+10. Serum urea    
+11. Serum creatinine    
+12. Serum Albumin     
+13. White Cell Count    
+14. Haemoglobin     
+15. Heart rate     
+16. Systolic blood pressure     
+17. Oxygen saturations    
+18. Respiratory history findings     
+19. Cardiac history findings    
+20. NYHA classification     
+21. ECG findings    
+22. Respiratory infection in last month    
+23. Cerebrovascular disease     
+24. Dementia history    
+25. Cancer diagnosis    
+26. Number of operations in last 30 days     
+27. Diabetes - with control status    
+28. Smoking status    
+29. Liver disease    
+30. Rockwood Clinical Frailty Scale     
+31. Index of multiple deprivation (IMD 2019 - adjusted using Abel 2016 method)    
+
+Excluded variables (based on missingness):
+1.  Troponin
+2.  Child's Pugh classification
+3.  Multi-stage procedures
+
+```{r}
+## Relevel variables to set reference level
+export_data <- export_data %>%
+  mutate(S01Gender = relevel(S01Gender, ref = "F"),
+         S02PatientsASAGrade.combined = relevel(S02PatientsASAGrade.combined, ref = "I"),
+         SORT_severity.combined = relevel(SORT_severity.combined, ref = "Min/Int/Maj"),
+         S02UrgencyOfSurgery = relevel(S02UrgencyOfSurgery, ref = "El"),
+         S02RespiratoryHistoryFindings.combined = relevel(S02RespiratoryHistoryFindings.combined, ref = "N"),
+         S02CardiacHistoryFindings.combined = relevel(S02CardiacHistoryFindings.combined, ref = "NF"),
+         S02NYHAHeartFailureClassification.combined = relevel(S02NYHAHeartFailureClassification.combined, ref = "I"),
+         S02ECGFindings = relevel(S02ECGFindings, ref = "N"),
+         S02PatientHadRespiratoryInfectionInTheLastMonth = relevel(S02PatientHadRespiratoryInfectionInTheLastMonth, ref = "N"),
+         S02PatientHasHistoryOfCerebrovascularDisease.combined = relevel(S02PatientHasHistoryOfCerebrovascularDisease.combined, ref = "N"),
+         S02PatientHasDementia = relevel(factor(S02PatientHasDementia), ref = "N"),
+         CancerDiagnosis = relevel(CancerDiagnosis, ref = "No cancer"),
+         S03HowManyOperationsInPast30Days.combined = relevel(S03HowManyOperationsInPast30Days.combined, ref = "1"),
+         Rockwood.combined = relevel(Rockwood.combined, ref = "1"),
+         S02PatientsSmokingHistory == relevel(S02PatientsSmokingHistory, "NS"),
+         S02PatientHasLiverDisease.combined = relevel(S02PatientHasLiverDisease.combined, ref = "N"),
+         IMD_quintile_adjusted = relevel(IMD_quintile_adjusted, ref = "1"))
+
+
+```
+
+#### Sensitivity analysis
+1.  Rockwood frailty scoring - run analysis based on data after introduction of Rockwood frailty scoring where missingness is lower    
+2. POMSmajor/Clavien-Dindo grade II and above complication as outcome measure
+
+
+## Multiple imputation
+
+We will use multiple imputation to handle missing variables. To do this we will use the MICE package in R, using the default predictive mean matching for continuous variables and logistic regression for binary variables. Our imputation model will include all candidate predictors.
+
+We will impute the dataset 10 times.
+
+```{r}
+
+export_data <- POSSUM.SORT.calculation(export_data)
+
+auc_SORT <- roc(export_data$POMS.overall, export_data$SORT.morbidity.intercept_slope_calibrated)
+set.seed(15092021)
+ci_auc_SORT <- ci.auc(auc_SORT, method = "bootstrap")
+
+auc_POSSUM <- roc(export_data$POMS.overall, export_data$POSSUM.morbidity.intercept_slope_calibrated)
+set.seed(15092021)
+ci_auc_POSSUM <- ci.auc(auc_POSSUM, method = "bootstrap")
+
+POMS_summary <- export_data %>% select(POMS.overall, POMS.major, ClavienGradeIIabove) %>%
+  mutate(n = 1) %>%
+  summarise(POMSoverall.perc = round(sum(POMS.overall)/sum(n)*100,1),
+            POMSmajor.perc = round(sum(POMS.major)/sum(n)*100,1),
+            ClavienGradeIIabove.perc = round(sum(ClavienGradeIIabove)/sum(n)*100,1),
+            POMSoverall.n = sum(POMS.overall),
+            POMSmajor.n = sum(POMS.major),
+            ClavienGradeIIabove.n = sum(ClavienGradeIIabove))
+
+n_LOS_7days <- paste(c(nrow(export_data %>% filter(LengthOfStay>=7)),"-", round(nrow(export_data %>% filter(LengthOfStay>=7))/nrow(export_data)*100,1),"%")) 
+
+POMS_organ_domain <- export_data %>% 
+  select(Pulmonary.overall, Infectious.overall, Renal.overall, Gastrointestinal.overall, Cardiovascular.overall, Neurological.overall, Haematological.overall, Wound.overall, Pain.overall) %>%
+  summarise(across(.cols = everything(), ~ sum(.x))) %>%
+  pivot_longer(everything()) %>%
+  mutate(n = value,
+         percent = round(value/nrow(export_data)*100,3)) %>%
+  select(name, n, percent)
+
+POMS.table <- export_data %>%
+  select(S06PatientHasNewRequirementForO2Therapy,
+         S06PatientHasNewRequirementForVentilator,
+         S06PatientIsOnIVAntibiotic,
+         S06HasHadATemperatureGreaterThan38InThePast24h,
+         S06PatientHasBeenUnableToTolerateEnteralNutrition,
+         S06PatientHasHadNauseaVomitingOrAbdominalDistensionInPast24h,
+         S06PatientHadSinceSurgeryOliguria,
+         S06PatientHadSinceSurgeryCreatinine30,
+         S06PatientHadSinceSurgeryUrinaryCatheterBeyondDay1,
+         S06PatientHasHadDiagnosticTestsHypotension,
+         S06PatientHasHadDiagnosticTestsNewMyocardialInfarctionOrIschaemia,
+         S06PatientHasHadDiagnosticTestsThromboticEvent,
+         S06PatientHasHadDiagnosticTestsArrhythmias,
+         S06PatientHasHadDiagnosticTestsCardiogenicPulmonaryOedema,
+         S06PatientHasDevelopedSinceSurgeryNewNeurologicalDeficit,
+         S06PatientHasDevelopedSinceSurgeryDeliriumOrConfusion,
+         S06PatientHasDevelopedSinceSurgerySedativeInducedComa,
+         S06PatientHasDevelopedSinceSurgeryNonSedativeAassociatedComa,
+         S06PatientHadWoundRequiringSurgicalExploration,
+         S06PatientHadDrainageOfPus,
+         S06PatientRequiredRedCellTransfusion,
+         S06PatientRequiredPlasma,
+         S06PatientSurgicalPainParenteralOpioids,
+         S06PatientSurgicalPainRegionalAnaesthesia) %>%
+  mutate(coma = S06PatientHasDevelopedSinceSurgerySedativeInducedComa == 1 | S06PatientHasDevelopedSinceSurgeryNonSedativeAassociatedComa == 1,
+         wound = S06PatientHadWoundRequiringSurgicalExploration == 1 | S06PatientHadDrainageOfPus == 1) %>%
+  dplyr::summarise(O2 = sum(S06PatientHasNewRequirementForO2Therapy==1)/length(S06PatientHasNewRequirementForO2Therapy),
+                   ventilator = sum(S06PatientHasNewRequirementForVentilator==1)/length(S06PatientHasNewRequirementForVentilator),
+                   IVanti = sum(S06PatientIsOnIVAntibiotic==1)/length(S06PatientIsOnIVAntibiotic),
+                   temperature = sum(S06HasHadATemperatureGreaterThan38InThePast24h==1)/length(S06HasHadATemperatureGreaterThan38InThePast24h),
+                   catheter = sum(S06PatientHadSinceSurgeryUrinaryCatheterBeyondDay1==1)/length(S06PatientHadSinceSurgeryUrinaryCatheterBeyondDay1),
+                   creat = sum(S06PatientHadSinceSurgeryCreatinine30==1)/length(S06PatientHadSinceSurgeryCreatinine30),
+                   Oliguria = sum(S06PatientHadSinceSurgeryOliguria==1)/length(S06PatientHadSinceSurgeryOliguria),
+                   ent.nut = sum(S06PatientHasBeenUnableToTolerateEnteralNutrition==1)/length(S06PatientHasBeenUnableToTolerateEnteralNutrition),
+                   nausea = sum(S06PatientHasHadNauseaVomitingOrAbdominalDistensionInPast24h==1)/length(S06PatientHasHadNauseaVomitingOrAbdominalDistensionInPast24h),
+                   thrombotic = sum(S06PatientHasHadDiagnosticTestsThromboticEvent==1)/length(S06PatientHasHadDiagnosticTestsThromboticEvent),
+                   arrythmmia = sum(S06PatientHasHadDiagnosticTestsArrhythmias==1)/length(S06PatientHasHadDiagnosticTestsArrhythmias),
+                   
+                   
+                   hypotension = sum(S06PatientHasHadDiagnosticTestsHypotension==1)/length(S06PatientHasHadDiagnosticTestsHypotension),
+                   myocard = sum(S06PatientHasHadDiagnosticTestsNewMyocardialInfarctionOrIschaemia==1)/length(S06PatientHasHadDiagnosticTestsNewMyocardialInfarctionOrIschaemia),
+                   
+                   pulOedema = sum(S06PatientHasHadDiagnosticTestsCardiogenicPulmonaryOedema==1)/length(S06PatientHasHadDiagnosticTestsCardiogenicPulmonaryOedema),
+                   coma = sum(coma)/length(coma),
+                   delerium = sum(S06PatientHasDevelopedSinceSurgeryDeliriumOrConfusion==1)/length(S06PatientHasDevelopedSinceSurgeryDeliriumOrConfusion),
+                   neurodef = sum(S06PatientHasDevelopedSinceSurgeryNewNeurologicalDeficit==1)/length(S06PatientHasDevelopedSinceSurgeryNewNeurologicalDeficit),
+                   FFP = sum(S06PatientRequiredPlasma==1)/length(S06PatientRequiredPlasma),
+                   RBC = sum(S06PatientRequiredRedCellTransfusion==1)/length(S06PatientRequiredRedCellTransfusion),
+                   wound = sum(wound)/length(wound),
+                   opiod = sum(S06PatientSurgicalPainParenteralOpioids==1)/length(S06PatientSurgicalPainParenteralOpioids),
+                   regional = sum(S06PatientSurgicalPainRegionalAnaesthesia==1)/length(S06PatientSurgicalPainRegionalAnaesthesia)) %>%
+  pivot_longer(cols = everything(), names_to = "POMSdomain") %>%
+  mutate(percent = round(value*100,3),
+         n = value*11646)
+
+clavien_summary <- export_data %>% select(S07GradeLevelOfComplicationsNone,
+                                          S07GradeLevelOfComplicationsGradeI,
+                                          S07GradeLevelOfComplicationsGradeII,
+                                          S07GradeLevelOfComplicationsGradeIIIA,
+                                          S07GradeLevelOfComplicationsGradeIIIB,
+                                          S07GradeLevelOfComplicationsGradeIVA,
+                                          S07GradeLevelOfComplicationsGradeIVB,
+                                          S07GradeLevelOfComplicationsGradeV) %>%
+  mutate(across(everything(), ~.x=="1")) %>%
+  summarise(across(everything(), ~sum(.x)/length(.x))) %>%
+  pivot_longer(everything()) %>%
+  mutate(n = value*nrow(export_data),
+         percent = round(value*100,4)) %>%
+  select(name, n, percent)
+
+
+data_impute <- export_data %>% 
+  select(POMS.overall, POMS.major, ClavienGradeIIabove,
+         S01Gender, S01AgeYears, S02PatientsASAGrade.combined, CancerDiagnosis,
+         SORT_severity.combined, ModeSurgeryCombined, S02UrgencyOfSurgery, S01BMI,
+         S02SerumSodium, S02SerumPotassium, S02SerumUrea, S02SerumCreatinine, 
+         S02WhiteCellCount, S02SerumAlbumin,
+         S02Haemoglobin, S02PulseRate, S02SystolicBP, S02SpO2, 
+         S02RespiratoryHistoryFindings.combined, S02CardiacHistoryFindings.combined,
+         S02NYHAHeartFailureClassification.combined, S02ECGFindings, 
+         S02PatientHadRespiratoryInfectionInTheLastMonth,
+         S02PatientHasHistoryOfCerebrovascularDisease.combined, S02PatientHasDementia, S03HowManyOperationsInPast30Days.combined, Diabetes, S02HbA1c, S02PatientsSmokingHistory,
+         S02PatientHasLiverDisease.combined,
+         S14LookAfterPersonalToiletHygieneUnaided,S14AbleToBreatheEasily,
+         S14WorkOrUndertakeUsualHomeActivities, 
+         EQ5D01Mobility, EQ5D02Selfcare, EQ5D03UsualActivities,
+         S15StandingForLongPeriodsSuchAs30Minutes,S15TakingCareOfHouseholdResponsibilities,
+         S15HowMuchProblemJoiningCommunityActivitiesInTheSameWayAsAnyoneElseCan,
+         S15WalkingALongDistanceSuchAsAKilometreOrEquivalent, S15WashingYourWholeBody,
+         S15GettingDressed, Rockwood.combined, SiteName, S01PostcodeOut,
+         IMD_quintile_adjusted) %>%
+  mutate(log.Urea = log(S02SerumUrea),
+         log.Creatinine = log(S02SerumCreatinine),
+         IMD_quintile_adjusted = recode(IMD_quintile_adjusted, 
+                                        `1` = "5 - least deprived",
+                                        `2` = "4",
+                                        `3` = "3",
+                                        `4` = "2",
+                                        `5` = "1 - most deprived"),
+         IMD_quintile_adjusted = relevel(IMD_quintile_adjusted, ref = "5 - least deprived"),
+         S15StandingForLongPeriodsSuchAs30Minutes = factor(S15StandingForLongPeriodsSuchAs30Minutes),
+         S15TakingCareOfHouseholdResponsibilities = factor(S15TakingCareOfHouseholdResponsibilities),
+         S15HowMuchProblemJoiningCommunityActivitiesInTheSameWayAsAnyoneElseCan = factor(S15HowMuchProblemJoiningCommunityActivitiesInTheSameWayAsAnyoneElseCan),
+         S15WalkingALongDistanceSuchAsAKilometreOrEquivalent = factor(S15WalkingALongDistanceSuchAsAKilometreOrEquivalent),
+         S15WashingYourWholeBody = factor(S15WashingYourWholeBody),
+         S15GettingDressed = factor(S15GettingDressed)) %>%
+  select(c(-S02SerumUrea, -S02SerumCreatinine))
+
+data_complteness <- pct_complete(data_impute %>% select(S01Gender,S01AgeYears, S02PatientsASAGrade.combined, CancerDiagnosis,SORT_severity.combined,ModeSurgeryCombined, S02UrgencyOfSurgery, S01BMI, S02SerumSodium, S02SerumPotassium, S02WhiteCellCount, S02SerumAlbumin, S02Haemoglobin, S02PulseRate, S02SystolicBP, S02SpO2, S02RespiratoryHistoryFindings.combined, S02CardiacHistoryFindings.combined, S02NYHAHeartFailureClassification.combined, S02ECGFindings, S02PatientHadRespiratoryInfectionInTheLastMonth, S02PatientHasHistoryOfCerebrovascularDisease.combined, S02PatientHasDementia, S03HowManyOperationsInPast30Days.combined, Diabetes, S02HbA1c,S02PatientsSmokingHistory, S02PatientHasLiverDisease.combined,IMD_quintile_adjusted,log.Urea, log.Creatinine))
+
+#rm(export_data)
+
+# perform multiple imputation using MICE package, m=10
+#mids <- parlmice(data_impute, m=10, cluster.seed = 26052021, ncore = 5)
+
+
+#densityplot(mids)
+
+#mids_data <- complete(mids, action = "long", include = TRUE) %>%
+#  mutate(Diabetes.control = ifelse(Diabetes == "N", "No diabetes",
+#                                  ifelse(Diabetes == "Y" & S02HbA1c <= 8.5, "Diabetes, good control", 
+#                                          ifelse(Diabetes == "Y" & S02HbA1c >8.5, "Diabetes, poor control",NA)))) %>%
+#  select(c(-S14LookAfterPersonalToiletHygieneUnaided,S14AbleToBreatheEasily,
+#           -S14WorkOrUndertakeUsualHomeActivities,
+#           -EQ5D01Mobility, 
+#           -EQ5D02Selfcare, 
+#           -EQ5D03UsualActivities,
+#           -S15StandingForLongPeriodsSuchAs30Minutes,
+#           -S15TakingCareOfHouseholdResponsibilities,
+#           -S15HowMuchProblemJoiningCommunityActivitiesInTheSameWayAsAnyoneElseCan,
+#           -S15WalkingALongDistanceSuchAsAKilometreOrEquivalent, 
+#           -S15WashingYourWholeBody,
+#           -S15GettingDressed,
+#           -S01PostcodeOut)) %>%
+#  as.mids(.)
+
+#save(mids_data, file = "mids_data.RData")
+load("mids_data.RData")
+
+mids.centred <- complete(mids_data, action = "long", include = FALSE) %>%
+  summarise(S01AgeYears.mean = round(mean(S01AgeYears),0),
+            S01BMI.mean = round(mean(S01BMI),0),
+            S02SerumSodium.mean = round(mean(S02SerumSodium),0),
+            S02SerumPotassium.mean = round(mean(S02SerumPotassium),1),
+            log.Urea.mean = round(mean(log.Urea),1),
+            log.Creatinine.mean = round(mean(log.Creatinine),1),
+            S02SerumAlbumin.mean = round(mean(S02SerumAlbumin),0),
+            S02WhiteCellCount.mean = round(mean(S02WhiteCellCount),1),
+            S02Haemoglobin.mean = round(mean(S02Haemoglobin),1),
+            S02PulseRate.mean = round(mean(S02PulseRate),0),
+            S02SystolicBP.mean = round(mean(S02SystolicBP),0),
+            S02SpO2.mean = round(mean(S02SpO2),0))
+
+
+mids_data <- complete(mids_data, action = "long", include = TRUE) %>%
+  mutate(S02PatientsSmokingHistory = relevel(S02PatientsSmokingHistory, ref = "NS")) %>%
+  mutate(S01AgeYears.centred = S01AgeYears - mids.centred$S01AgeYears.mean,
+            S01BMI.centred  = S01BMI - mids.centred$S01BMI.mean,
+            S02SerumSodium.centred  = S02SerumSodium - mids.centred$S02SerumSodium.mean,
+            S02SerumPotassium.centred  = S02SerumPotassium - mids.centred$S02SerumPotassium.mean,
+            log.Urea.centred  = log.Urea - mids.centred$log.Urea.mean,
+            log.Creatinine.centred  = log.Creatinine - mids.centred$log.Creatinine.mean,
+            S02SerumAlbumin.centred  = S02SerumAlbumin - mids.centred$S02SerumAlbumin.mean,
+            S02WhiteCellCount.centred  = S02WhiteCellCount - mids.centred$S02WhiteCellCount.mean,
+            S02Haemoglobin.centred  = S02Haemoglobin - mids.centred$S02Haemoglobin.mean,
+            S02PulseRate.centred  = S02PulseRate - mids.centred$S02PulseRate.mean,
+            S02SystolicBP.centred  = S02SystolicBP - mids.centred$S02SystolicBP.mean,
+            S02SpO2.centred  = S02SpO2 - mids.centred$S02SpO2.mean) %>%
+  as.mids(.) 
+```
+
+```{r}
+## create summary statistics of dataframe for table 1
+summary_table_Age <- summary_variable_POMS_numerical(mids_data, S01AgeYears, 
+                                           breaks = c(-Inf,39,49,59,69,79,Inf))
+summary_table_Age
+
+summary_table_Sex <- summary_variable_POMS_factor(mids_data, S01Gender)
+summary_table_Sex
+
+summary_table_ASA <- summary_variable_POMS_factor(mids_data, S02PatientsASAGrade.combined)
+summary_table_ASA
+
+summary_table_Cancer <- summary_variable_POMS_factor(mids_data, CancerDiagnosis)
+summary_table_Cancer
+
+summary_table_SORT <- summary_variable_POMS_factor(mids_data, SORT_severity.combined)
+summary_table_SORT
+
+summary_table_mode <- summary_variable_POMS_factor(mids_data, ModeSurgeryCombined)
+summary_table_mode
+
+summary_table_Urgency <- summary_variable_POMS_factor(mids_data, S02UrgencyOfSurgery)
+summary_table_Urgency
+
+summary_table_BMI <- summary_variable_POMS_numerical(mids_data, S01BMI, 
+                                           breaks = c(-Inf,18.49,24.9,29.9,39.9,Inf))
+summary_table_BMI
+
+summary_table_Sodium <- summary_variable_POMS_numerical(mids_data, S02SerumSodium, 
+                                           breaks = c(-Inf,133,146,Inf))
+summary_table_Sodium
+
+summary_table_Potassium <- summary_variable_POMS_numerical(mids_data, S02SerumPotassium, 
+                                           breaks = c(-Inf,3.5,5.3,Inf))
+summary_table_Potassium
+
+summary_table_Urea <- summary_variable_POMS_numerical(mids_data, log.Urea, 
+                                           breaks = c(-Inf,log(2.5),log(7.8),Inf))
+summary_table_Urea
+
+summary_table_creatinine <- complete(mids_data, "long") %>%
+  as_tibble() %>%
+  select(S01Gender, log.Creatinine, POMS.overall) %>%
+  mutate(creat_level = ifelse(S01Gender == "M" & log.Creatinine < log(59), 
+                              "low",
+                              ifelse(S01Gender == "F" & log.Creatinine < log(45), 
+                                     "low",
+                                     ifelse(S01Gender == "M" & log.Creatinine > log(104),
+                                            "high",
+                                                   ifelse(S01Gender == "F" & log.Creatinine > log(84), 
+                                                          "high",
+                                                          "normal")))),
+         n=1) %>%
+    group_by(creat_level) %>%
+    summarise(POMS.n = sum(POMS.overall)/10,
+              n = sum(n)/10) %>%
+    mutate(perc = round(n/sum(n)*100,3),
+           perc.POMS = round(POMS.n/n*100,3))
+  
+
+summary_table_WCC<- summary_variable_POMS_numerical(mids_data, S02WhiteCellCount, 
+                                           breaks = c(-Inf,3.6,11.0,Inf))
+summary_table_WCC
+
+summary_table_Albumin<- summary_variable_POMS_numerical(mids_data, S02SerumAlbumin, 
+                                           breaks = c(-Inf,35,50,Inf))
+summary_table_Albumin
+
+summary_table_Hb<- summary_variable_POMS_numerical(mids_data, S02Haemoglobin, 
+                                           breaks = c(-Inf,9.0,11.0,13.0,Inf))
+summary_table_Hb
+
+summary_table_Pulse<- summary_variable_POMS_numerical(mids_data, S02PulseRate, 
+                                           breaks = c(-Inf,59,79,99,Inf))
+summary_table_Pulse
+
+summary_table_BP <- summary_variable_POMS_numerical(mids_data, S02SystolicBP, 
+                                           breaks = c(-Inf,99,129,159,Inf))
+summary_table_BP
+
+summary_table_SpO2 <- summary_variable_POMS_numerical(mids_data, S02SpO2, 
+                                           breaks = c(-Inf,93.9,Inf))
+summary_table_SpO2
+
+summary_table_Resp <- summary_variable_POMS_factor(mids_data, S02RespiratoryHistoryFindings.combined)
+summary_table_Resp
+
+summary_table_Cardiac <- summary_variable_POMS_factor(mids_data, S02CardiacHistoryFindings.combined)
+summary_table_Cardiac
+
+summary_table_NYHA <- summary_variable_POMS_factor(mids_data, S02NYHAHeartFailureClassification.combined)
+summary_table_NYHA
+
+summary_table_ECG <- summary_variable_POMS_factor(mids_data, S02ECGFindings)
+summary_table_ECG
+
+summary_table_infection <- summary_variable_POMS_factor(mids_data, S02PatientHadRespiratoryInfectionInTheLastMonth)
+summary_table_infection
+
+summary_table_CVA <- summary_variable_POMS_factor(mids_data, S02PatientHasHistoryOfCerebrovascularDisease.combined)
+summary_table_CVA
+
+summary_table_dementia <- summary_variable_POMS_factor(mids_data, S02PatientHasDementia)
+summary_table_dementia
+
+summary_table_nOps <- summary_variable_POMS_factor(mids_data, S03HowManyOperationsInPast30Days.combined)
+summary_table_nOps
+
+summary_table_smoking <- summary_variable_POMS_factor(mids_data, S02PatientsSmokingHistory)
+summary_table_smoking
+
+summary_table_Diabetes <- summary_variable_POMS_factor(mids_data, Diabetes.control)
+summary_table_Diabetes
+
+summary_table_liver <- summary_variable_POMS_factor(mids_data, S02PatientHasLiverDisease.combined)
+summary_table_liver
+
+summary_table_rockwood <- summary_variable_POMS_factor(mids_data, Rockwood.combined)
+summary_table_rockwood
+
+summary_table_IMD <- summary_variable_POMS_factor(mids_data, IMD_quintile_adjusted)
+summary_table_IMD
+
+missing_data_summary <- data_impute %>%
+  summarise(Age = sum(is.na(S01AgeYears))/nrow(data_impute),
+            Sex = sum(is.na(S01Gender))/nrow(data_impute),
+            ASA = sum(is.na(S02PatientsASAGrade.combined))/nrow(data_impute),
+            Cancer = sum(is.na(CancerDiagnosis))/nrow(data_impute),
+            SORT = sum(is.na(SORT_severity.combined))/nrow(data_impute),
+            Mode = sum(is.na(ModeSurgeryCombined))/nrow(data_impute),
+            Urgency = sum(is.na(S02UrgencyOfSurgery))/nrow(data_impute),
+            BMI = sum(is.na(S01BMI))/nrow(data_impute),
+            Na = sum(is.na(S02SerumSodium))/nrow(data_impute),
+            K = sum(is.na(S02SerumPotassium))/nrow(data_impute),
+            WCC = sum(is.na(S02WhiteCellCount))/nrow(data_impute),
+            Albumin = sum(is.na(S02SerumAlbumin))/nrow(data_impute),
+            Hb = sum(is.na(S02Haemoglobin))/nrow(data_impute),
+            Pulse = sum(is.na(S02PulseRate))/nrow(data_impute),
+            BP = sum(is.na(S02SystolicBP))/nrow(data_impute),
+            SpO2 = sum(is.na(S02SpO2))/nrow(data_impute),
+            RespHx = sum(is.na(S02RespiratoryHistoryFindings.combined))/nrow(data_impute),
+            CardioHx = sum(is.na(S02CardiacHistoryFindings.combined))/nrow(data_impute),
+            NYHA = sum(is.na(S02NYHAHeartFailureClassification.combined))/nrow(data_impute),
+            ECG = sum(is.na(S02ECGFindings))/nrow(data_impute),
+            RespInf = sum(is.na(S02PatientHadRespiratoryInfectionInTheLastMonth))/nrow(data_impute),
+            CVA = sum(is.na(S02PatientHasHistoryOfCerebrovascularDisease.combined))/nrow(data_impute),
+            Dementia = sum(is.na(S02PatientHasDementia))/nrow(data_impute),
+            Ops30 = sum(is.na(S03HowManyOperationsInPast30Days.combined))/nrow(data_impute),
+            Diabetes = sum(Diabetes == "Y" & is.na(S02HbA1c))/nrow(data_impute),
+            Smoking = sum(is.na(S02PatientsSmokingHistory))/nrow(data_impute),
+            Liver = sum(is.na(S02PatientHasLiverDisease.combined))/nrow(data_impute),
+            Rockwood = sum(is.na(Rockwood.combined))/nrow(data_impute),
+            IMD = sum(is.na(IMD_quintile_adjusted))/nrow(data_impute),
+            Urea = sum(is.na(log.Urea))/nrow(data_impute),
+            Creat = sum(is.na(log.Creatinine))/nrow(data_impute)) %>%
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "percent_missing") %>%
+  mutate(n_missing = percent_missing*nrow(data_impute),
+         percent_missing = round(percent_missing*100,2))
+
+```
+
+```{r}
+## Decide number of knots for each continuous variable based on AIC of univariate model. Compare performance between 3 and 4 knots for each variable
+source("./source files/knot_placement_AIC.R")
+
+# Define full model
+full.model <- POMS.overall ~ S01Gender + rcs(S01AgeYears.centred,3) + S02PatientsASAGrade.combined + SORT_severity.combined + ModeSurgeryCombined + S02UrgencyOfSurgery + rcs(S01BMI.centred,4) + 
+  rcs(S02SerumSodium.centred,4) + rcs(S02SerumPotassium.centred,3) + rcs(log.Urea.centred,4) +
+  rcs(log.Creatinine.centred,4) + rcs(S02SerumAlbumin.centred,4) + rcs(S02WhiteCellCount.centred,4) + rcs(S02Haemoglobin.centred,3) + 
+  rcs(S02PulseRate.centred,4) + rcs(S02SystolicBP.centred,3) + rcs(S02SpO2.centred,3) + S02RespiratoryHistoryFindings.combined + S02CardiacHistoryFindings.combined + 
+  S02NYHAHeartFailureClassification.combined + S02ECGFindings + S02PatientHadRespiratoryInfectionInTheLastMonth + S02PatientHasHistoryOfCerebrovascularDisease.combined + S02PatientHasDementia  + CancerDiagnosis  + S03HowManyOperationsInPast30Days.combined + Diabetes.control + Rockwood.combined + S02PatientsSmokingHistory + S02PatientHasLiverDisease.combined + IMD_quintile_adjusted
+
+# Check correlation matrix for continuous variables
+cov.matrix <- rcorr(as.matrix(complete(mids_data,0) %>% select(S01AgeYears.centred, S01BMI.centred, S02SerumSodium.centred, S02SerumPotassium.centred, log.Urea.centred, log.Creatinine.centred, S02SerumAlbumin.centred, S02WhiteCellCount.centred, S02Haemoglobin.centred, S02PulseRate.centred, S02SystolicBP.centred, S02SpO2.centred)), 
+                    type="pearson")
+
+
+#fit full model on each imputed dataset
+model.fit1 <- glm(full.model, complete(mids_data,1), family = "binomial")
+model.fit2 <- glm(full.model, complete(mids_data,2), family = "binomial")
+model.fit3 <- glm(full.model, complete(mids_data,3), family = "binomial")
+model.fit4 <- glm(full.model, complete(mids_data,4), family = "binomial")
+model.fit5 <- glm(full.model, complete(mids_data,5), family = "binomial")
+model.fit6 <- glm(full.model, complete(mids_data,6), family = "binomial")
+model.fit7 <- glm(full.model, complete(mids_data,7), family = "binomial")
+model.fit8 <- glm(full.model, complete(mids_data,8), family = "binomial")
+model.fit9 <- glm(full.model, complete(mids_data,9), family = "binomial")
+model.fit10 <- glm(full.model, complete(mids_data,10), family = "binomial")
+
+# Perform bootstrap backwards stepwise selection across multiply imputed datasets
+stepAIC.MI1 <- boot.stepAIC(model.fit1, complete(mids_data,1), B = 500, alpha = 0.05, direction = "backward", 
+             k = 2, seed = 10062021)
+save(stepAIC.MI1, file = "stepAIC_1.RData")
+rm(stepAIC.MI1)
+
+stepAIC.MI2 <- boot.stepAIC(model.fit2, complete(mids_data,2), B = 500, alpha = 0.05, direction = "backward", 
+             k = 2, verbose = TRUE, seed = 11062021)
+
+save(stepAIC.MI2, file = "stepAIC_2.RData")
+rm(stepAIC.MI2)
+
+stepAIC.MI3 <- boot.stepAIC(model.fit3, complete(mids_data,3), B = 500, alpha = 0.05, direction = "backward", 
+             k = 2, verbose = TRUE, seed = 12062021)
+save(stepAIC.MI3, file = "stepAIC_3.RData")
+rm(stepAIC.MI3)
+
+stepAIC.MI4 <- boot.stepAIC(model.fit4, complete(mids_data,4), B = 500, alpha = 0.05, direction = "backward", 
+             k = 2, verbose = TRUE, seed = 13062021)
+save(stepAIC.MI4, file = "stepAIC_4.RData")
+rm(stepAIC.MI4)
+
+stepAIC.MI5 <- boot.stepAIC(model.fit5, complete(mids_data,5), B = 500, alpha = 0.05, direction = "backward", 
+            k = 2, verbose = TRUE, seed = 14062021)
+save(stepAIC.MI5, file = "stepAIC_5.RData")
+rm(stepAIC.MI5)
+
+stepAIC.MI6 <- boot.stepAIC(model.fit6, complete(mids_data,6), B = 500, alpha = 0.05, direction = "backward",              k = 2, verbose = TRUE, seed = 15062021)
+save(stepAIC.MI6, file = "stepAIC_6.RData")
+rm(stepAIC.MI6)
+
+stepAIC.MI7 <- boot.stepAIC(model.fit7, complete(mids_data,7), B = 500, alpha = 0.05, direction = "backward", 
+             k = 2, verbose = TRUE, seed = 16062021)
+save(stepAIC.MI7, file = "stepAIC_7.RData")
+rm(stepAIC.MI7)
+
+stepAIC.MI8 <- boot.stepAIC(model.fit8, complete(mids_data,8), B = 500, alpha = 0.05, direction = "backward", 
+             k = 2, verbose = TRUE, seed = 17062021)
+save(stepAIC.MI8, file = "stepAIC_8.RData")
+rm(stepAIC.MI8)
+
+stepAIC.MI9 <- boot.stepAIC(model.fit9, complete(mids_data,9), B = 500, alpha = 0.05, direction = "backward", 
+             k = 2, verbose = TRUE, seed = 18062021)
+save(stepAIC.MI9, file = "stepAIC_9.RData")
+rm(stepAIC.MI9)
+
+stepAIC.MI10 <- boot.stepAIC(model.fit10, complete(mids_data,10), B = 500, alpha = 0.05, direction = "backward", 
+             k = 2, verbose = TRUE, seed = 19062021)
+
+# Save multiple objects
+save(stepAIC.MI10, file = "stepAIC_10.RData")
+rm(stepAIC.MI10)
+```
+
+### Combine variable selection frequencies
+
+We will now combine all the variable frequency selection into a table to determine our final model - variables selected into >70% bootstrapped models.
+
+```{r}
+# load bootStepAIC objects created above
+load("StepAIC/POMS/linear_rcs_3_4/stepAIC_1.RData")
+load("StepAIC/POMS/linear_rcs_3_4/stepAIC_2.RData")
+
+variable.frequency <- full_join(tibble::rownames_to_column(as.data.frame(stepAIC.MI1$Covariates), "Variable"),
+                                tibble::rownames_to_column(as.data.frame(stepAIC.MI2$Covariates), "Variable"), 
+                                by = "Variable") %>%
+  rename(., 
+         imp1 = `(%).x`, 
+         imp2 = `(%).y`)
+
+# remove objects to free up RAM
+rm(stepAIC.MI1, stepAIC.MI2)
+
+# load bootStepAIC objects
+load("StepAIC/POMS/linear_rcs_3_4/stepAIC_3.RData")
+load("StepAIC/POMS/linear_rcs_3_4/stepAIC_4.RData")
+
+variable.frequency <- full_join(variable.frequency,
+                                tibble::rownames_to_column(as.data.frame(stepAIC.MI3$Covariates), "Variable"),
+            by = "Variable") %>%
+  full_join(tibble::rownames_to_column(as.data.frame(stepAIC.MI4$Covariates), "Variable"),
+            by = "Variable") %>%
+  rename(., 
+         imp3 = `(%).x`, 
+         imp4 = `(%).y`)
+
+# remove objects to free up RAM
+rm(stepAIC.MI3, stepAIC.MI4)
+
+# load bootStepAIC objects
+load("StepAIC/POMS/linear_rcs_3_4/stepAIC_5.RData")
+load("StepAIC/POMS/linear_rcs_3_4/stepAIC_6.RData")
+
+variable.frequency <- full_join(variable.frequency,
+                                tibble::rownames_to_column(as.data.frame(stepAIC.MI5$Covariates), "Variable"),
+            by = "Variable") %>%
+  full_join(tibble::rownames_to_column(as.data.frame(stepAIC.MI6$Covariates), "Variable"),
+            by = "Variable") %>%
+  rename(., 
+         imp5 = `(%).x`, 
+         imp6 = `(%).y`)
+
+# remove objects to free up RAM
+rm(stepAIC.MI5, stepAIC.MI6)
+
+# load bootStepAIC objects
+load("StepAIC/POMS/linear_rcs_3_4/stepAIC_7.RData")
+load("StepAIC/POMS/linear_rcs_3_4/stepAIC_8.RData")
+
+variable.frequency <- full_join(variable.frequency,
+                                tibble::rownames_to_column(as.data.frame(stepAIC.MI7$Covariates), "Variable"),
+            by = "Variable") %>%
+  full_join(tibble::rownames_to_column(as.data.frame(stepAIC.MI8$Covariates), "Variable"),
+            by = "Variable") %>%
+  rename(., 
+         imp7 = `(%).x`, 
+         imp8 = `(%).y`)
+
+# remove objects to free up RAM
+rm(stepAIC.MI7, stepAIC.MI8)
+
+# load bootStepAIC objects
+load("StepAIC/POMS/linear_rcs_3_4/stepAIC_9.RData")
+load("StepAIC/POMS/linear_rcs_3_4/stepAIC_10.RData")
+
+variable.frequency <- full_join(variable.frequency,
+                                tibble::rownames_to_column(as.data.frame(stepAIC.MI9$Covariates), "Variable"),
+            by = "Variable") %>%
+  full_join(tibble::rownames_to_column(as.data.frame(stepAIC.MI10$Covariates), "Variable"),
+            by = "Variable") %>%
+  rename(., 
+         imp9 = `(%).x`, 
+         imp10 = `(%).y`)
+
+# remove objects to free up RAM
+rm(stepAIC.MI9, stepAIC.MI10)
+
+#summarise results of each multiply imputation bootstrap model fits:
+variable.frequency.sum <- variable.frequency %>%
+  pivot_longer(., names_to = "imputation", cols = starts_with("imp")) %>% 
+  group_by(Variable) %>%
+  summarise(mean_frequency = mean(value),
+            sd_frequency = sd(value),
+            median_frequency = median(value),
+            IQR.25 = quantile(value, 0.25),
+            IQR.75 = quantile(value, 0.75)) %>%
+  arrange(desc(mean_frequency))
+
+#show top 20 rows of variable.frequency.sum
+head(variable.frequency.sum, 20)
+```
+
+### 
+
+### Fit final model
+
+```{r}
+
+final.model <- POMS.overall ~ 
+                         ModeSurgeryCombined + 
+                         Rockwood.combined +
+                         S01Gender +
+                         SORT_severity.combined +
+                         S02PatientsASAGrade.combined +
+                         rcs(S01BMI.centred, 4) +        
+                         rcs(S02SerumSodium.centred, 4) +
+                         IMD_quintile_adjusted +
+                         rcs(log.Creatinine.centred, 4) +
+                         rcs(S02WhiteCellCount.centred, 4) +
+                         rcs(log.Urea.centred, 4) +
+                         rcs(S01AgeYears.centred, 3)
+                         
+## fit final model using glm and with function from MICE
+final.model.fit <- with(mids_data, glm(POMS.overall ~ 
+                         ModeSurgeryCombined + 
+                         Rockwood.combined +
+                         S01Gender +
+                         SORT_severity.combined +
+                         S02PatientsASAGrade.combined +
+                         rcs(S01BMI.centred, 4) +        
+                         rcs(S02SerumSodium.centred, 4) +
+                         IMD_quintile_adjusted +
+                         rcs(log.Creatinine.centred, 4) +
+                         rcs(S02WhiteCellCount.centred, 4) +
+                         rcs(log.Urea.centred, 4) +
+                         rcs(S01AgeYears.centred, 3), 
+                       family = "binomial"))
+
+# model estimates on log odds scale
+est1 <- pool(final.model.fit)
+summary(est1)
+
+## model estimates on odds ratio scale
+summary(est1, conf.int = TRUE, exponentiate = TRUE)[,c(1,2,7,8)]
+
+## fit final model using lrm package
+lrm.mult.impute <- fit.mult.impute(formula = final.model, xtrans = mids_data, fitter = lrm,
+                                   x=TRUE, y=TRUE)
+
+## display model call to calculate model predictions outside R environment
+model.calculation <- Function(lrm.mult.impute)
+model.calculation
+```
+
+### Internal bootstrap validation
+
+```{r}
+# perform internal validation using validate function in lrm
+#validation <- extract_fits_validate(mids.object=mids_data, M=10, model=final.model, seed=18062021)
+#save(validation, file = "internal_validation_rcs3_4.RData")
+
+load("internal_validation_rcs3_4.RData")
+
+
+# combine individual validation fits into datatable to allow pooling of model performance
+validation_data <- rbind.data.frame(tibble(validation$validation_m1$mids_validate),
+                                    tibble(validation$validation_m2$mids_validate),
+                                    tibble(validation$validation_m3$mids_validate),
+                                    tibble(validation$validation_m4$mids_validate),
+                                    tibble(validation$validation_m5$mids_validate),
+                                    tibble(validation$validation_m6$mids_validate),
+                                    tibble(validation$validation_m7$mids_validate),
+                                    tibble(validation$validation_m8$mids_validate),
+                                    tibble(validation$validation_m9$mids_validate),
+                                    tibble(validation$validation_m10$mids_validate)) %>%
+  mutate(c_statistic_training = 0.5*(Dxy_training+1),
+         c_statistic_test = 0.5*(Dxy_test+1),
+         c_statistic_optimism = c_statistic_training-c_statistic_test,
+         slope_optimism = Slope_training - Slope_test,
+         slope_index_corrected = 1-slope_optimism,
+         intercept_optimism = Intercept_training - Intercept_test,
+         intercept_index_corrected = 0-intercept_optimism,
+         Brier_optimism = B_training - B_test,
+         R2_optimism = R2_training - R2_test)
+
+imp.c_stat <- list()
+imp.R2 <- list()
+imp.Brier <- list()
+
+for (i in 1:10) {
+  model.fit <- lrm(final.model, data=complete(mids_data,i))
+  name <- paste0('imp.',i)
+  imp.c_stat[name] <- model.fit$stats[6]
+  imp.R2[name] <- model.fit$stats[10]
+  imp.Brier[name] <- model.fit$stats[11]
+}
+
+imp.c_stat <- cbind.data.frame(tibble(matrix(unlist(imp.c_stat))),
+                               tibble(matrix(unlist(imp.R2))),
+                               tibble(matrix(unlist(imp.Brier)))) %>%
+  mutate(.imp = 1:10) %>%
+  dplyr::rename(.,
+         original_c_statistic = `matrix(unlist(imp.c_stat))`,
+         original_Brier = `matrix(unlist(imp.Brier))`,
+         original_R2 = `matrix(unlist(imp.R2))`)
+
+validation_data <- left_join(validation_data, imp.c_stat, by = ".imp") %>%
+  mutate(original_c_stat = c_statistic_training,
+         optimism_corrected_c_stat = original_c_statistic-c_statistic_optimism,
+         optimism_corrected_brier = original_Brier - Brier_optimism,
+         optimism_corrected_R2 = original_R2 - R2_optimism) %>%
+  group_by(.imp) %>%
+  mutate(mean_original_c_stat = mean(original_c_stat),
+         mean_c_stat_imp = mean(optimism_corrected_c_stat),
+         mean_Brier_imp = mean(optimism_corrected_brier)) %>%
+  ungroup() %>%
+  mutate(original_c_stat_SE = original_c_stat - mean_original_c_stat,
+         original_c_stat_SE.sq = (original_c_stat - mean_original_c_stat)^2,
+         c_stat_SE.sq = (optimism_corrected_c_stat - mean_c_stat_imp)^2,
+         c_stat_SE = optimism_corrected_c_stat - mean_c_stat_imp,
+         Brier_SE.sq = (optimism_corrected_brier-mean_Brier_imp)^2,
+         Brier_SE = optimism_corrected_brier-mean_Brier_imp)
+
+# calculate mean model performance estimates
+mean(validation_data$optimism_corrected_c_stat)
+mean(validation_data$slope_index_corrected)
+mean(validation_data$intercept_optimism)
+
+
+
+slope_data <- validation_data %>%
+  dplyr::group_by(.imp) %>%
+  dplyr::summarise(mean_slope_index_corrected = mean(slope_index_corrected),
+            var.within = sd(slope_index_corrected)/sqrt(1000),
+            variance = Var(slope_index_corrected),
+            SE = sd(slope_index_corrected)/sqrt(1000),
+            SD = sd(slope_index_corrected),
+            mean_intercept = mean(intercept_index_corrected),
+            variance.intercept = Var(intercept_index_corrected))
+
+
+## optimism corrected slope
+slope.var_within <- 1/10 * sum(slope_data$variance)
+
+slope.var_between <- (1/(10-1))*sum((slope_data$mean_slope_index_corrected - mean(slope_data$mean_slope_index_corrected))^2)
+
+slope.var_total <- slope.var_within + (slope.var_between*(1+1/10))
+
+slope.se_pooled <- sqrt(slope.var_total)
+
+slope.pooled_95_conf_int <- c(mean(slope_data$mean_slope_index_corrected)-1.96*slope.se_pooled,
+                               mean(slope_data$mean_slope_index_corrected),
+                               mean(slope_data$mean_slope_index_corrected)+1.96*slope.se_pooled)
+slope.pooled_95_conf_int
+## optimism corrected intercept
+intercept.var_within <- 1/10 * sum(slope_data$variance.intercept)
+
+intercept.var_between <- (1/(10-1))*sum((slope_data$mean_intercept - mean(slope_data$mean_intercept))^2)
+
+intercept.var_total <- intercept.var_within + (intercept.var_between*(1+1/10))
+
+intercept.se_pooled <- sqrt(intercept.var_total)
+
+intercept.pooled_95_conf_int <- c(mean(slope_data$mean_intercept)-1.96*intercept.se_pooled,
+                               mean(slope_data$mean_intercept),
+                               mean(slope_data$mean_intercept)+1.96*intercept.se_pooled)
+intercept.pooled_95_conf_int            
+
+
+perf <- pool_performance(data=complete(mids_data, action = "long", include = FALSE), nimp=10,
+                         impvar=".imp", 
+                         Outcome = "POMS.overall", predictors = c("ModeSurgeryCombined",
+                                          "Rockwood.combined",
+                                          "S01Gender",
+                                          "SORT_severity.combined",
+                                          "S02PatientsASAGrade.combined",
+                                          "rcs(S01BMI.centred, 4)",
+                                          "rcs(S02SerumSodium.centred, 4)",
+                                          "rcs(S01AgeYears.centred, 3)",
+                                          "IMD_quintile_adjusted",
+                                          "rcs(log.Creatinine.centred, 4)",
+                                          "rcs(S02WhiteCellCount.centred, 4)",
+                                          "rcs(log.Urea.centred, 4)"), 
+ cal.plot=TRUE, plot.indiv=TRUE, groups_cal = 15)
+
+# create datatable of model discrimination across imputed datasets, prior to pooling using the pool_auc function
+c_stat_data <- validation_data %>%
+  group_by(.imp) %>%
+  dplyr::summarise(mean_opt_corr_C = mean(optimism_corrected_c_stat),
+            variance_corrected_Cstat = mean(Var(optimism_corrected_c_stat)),
+            SD_Cstat = sqrt(variance_corrected_Cstat))
+ 
+optimism_corrected_C_stat_CI95 <- pool_auc(est_auc = c_stat_data$mean_opt_corr_C, 
+          est_se = c_stat_data$SD_Cstat, nimp = 10, log_auc = TRUE)
+
+optimism_corrected_C_stat_CI95
+```
+
+### Calibration plot
+
+```{r}
+## ==================================================
+# Create calibration plot
+## ==================================================
+
+predictions <- list()
+
+for (i in 0:10) {
+  preds <- complete(mids_data, i) %>% 
+    mutate(pred.logit = -3.3081876 +
+             0.71919942*(ModeSurgeryCombined=="Opn") +
+             0.34618954*(ModeSurgeryCombined=="Rob") +
+             0.2551226*(Rockwood.combined=="2") +
+             0.51657126*(Rockwood.combined=="3") +
+             0.70509523*(Rockwood.combined=="4") +
+             0.8082908*(Rockwood.combined=="5") +
+             0.90823978*(Rockwood.combined=="6-9") +
+             0.30969644*(S01Gender=="M") +
+             0.17454359*(SORT_severity.combined=="Xma") +
+             0.56964698*(SORT_severity.combined=="Com") +
+             0.15952372*(S02PatientsASAGrade.combined=="II") +
+             0.42110205*(S02PatientsASAGrade.combined=="III") +
+             0.44385062*(S02PatientsASAGrade.combined=="IV/V") +
+             -0.022455417* S01BMI.centred +
+             0.00058549124*pmax(S01BMI.centred+7.99,0)^3 +
+             -0.0017445337*pmax(S01BMI.centred+2.92,0)^3 +
+             0.0013330039*pmax(S01BMI.centred-0.9,0)^3 +
+             -0.00017396144*pmax(S01BMI.centred-9.2875,0)^3 +
+             -0.029228382* S02SerumSodium.centred +
+             -0.00012250672*pmax(S02SerumSodium.centred+6,0)^3 +
+             0.0034580052*pmax(S02SerumSodium.centred+1,0)^3 +
+             -0.0053549862*pmax(S02SerumSodium.centred-1,0)^3 +
+             0.0020194878*pmax(S02SerumSodium.centred-4,0)^3 +
+             0.030910885*(IMD_quintile_adjusted=="4") +
+             -0.014178209*(IMD_quintile_adjusted=="3") +
+             0.17637341*(IMD_quintile_adjusted=="2") +
+             0.15955264*(IMD_quintile_adjusted=="1 - most deprived") +
+             -0.78754659* log.Creatinine.centred +
+             4.3784501*pmax(log.Creatinine.centred+0.34875628,0)^3 +
+             -14.909756*pmax(log.Creatinine.centred+0.065893495,0)^3 +
+             12.759045*pmax(log.Creatinine.centred-0.11884061,0)^3 +
+             -2.2277398*pmax(log.Creatinine.centred-0.43619845,0)^3 +
+             -0.010351246* S02WhiteCellCount.centred +
+             0.0021637774*pmax(S02WhiteCellCount.centred+3.2,0)^3 +
+             -0.0048087225*pmax(S02WhiteCellCount.centred+1.2,0)^3 +
+             0.0026861286*pmax(S02WhiteCellCount.centred-0.5,0)^3 +
+             -0.000041183419*pmax(S02WhiteCellCount.centred-4.6,0)^3 +
+             -0.5855539* log.Urea.centred +
+             0.73580682*pmax(log.Urea.centred+0.53528926,0)^3 +
+             -2.4752866*pmax(log.Urea.centred+0.073943697,0)^3 +
+             1.8187039*pmax(log.Urea.centred-0.14046617,0)^3 +
+             -0.079224044*pmax(log.Urea.centred-0.56332303,0)^3 +
+             0.0017750254* S01AgeYears.centred +
+             0.0000026814324*pmax(S01AgeYears.centred+20,0)^3 +
+             -0.0000074255052*pmax(S01AgeYears.centred-3,0)^3 +
+             0.0000047440728*pmax(S01AgeYears.centred-16,0)^3) %>%
+  mutate(pred = inv.logit(pred.logit),
+         .imp = paste(i),
+         pred.logit.corr = mean(validation_data$intercept_index_corrected) + (pred.logit * mean(validation_data$slope_index_corrected)),
+         pred.calibration.corr = inv.logit(pred.logit.corr)) %>%
+  select(.imp, POMS.overall, pred.logit, pred, pred.logit.corr, pred.calibration.corr)
+  
+  name <- paste0('imp.',i)
+  predictions[[name]] <- tibble(preds)
+
+}
+
+predictions <- rbind.data.frame(predictions$imp.1,
+                                predictions$imp.2,
+                                predictions$imp.3,
+                                predictions$imp.4,
+                                predictions$imp.5,
+                                predictions$imp.6,
+                                predictions$imp.7,
+                                predictions$imp.8,
+                                predictions$imp.9,
+                                predictions$imp.10) 
+
+predictions <- predictions %>%
+  mutate(Id = rep(1:nrow(export_data),10))
+
+
+Predicted = predictions %>%
+  group_by(Id) %>%
+  mutate(mean.pred.logit = mean(pred.logit),
+         mean.pred = mean(pred),
+         sd.pred = sd(pred)) %>%
+  slice_head(prop = 0.1) %>%
+  ungroup() %>%
+  select(POMS.overall, mean.pred.logit, mean.pred, sd.pred) %>%
+  mutate(binPred=ntile(mean.pred,10),
+         Outcome=ifelse(POMS.overall==TRUE,1,0),
+         Freq=1) %>%
+  ungroup() %>%
+  group_by(binPred) %>% 
+  summarise(Observed=sum(Outcome, na.rm = TRUE)/sum(Freq, na.rm = TRUE),
+            Predicted=mean(mean.pred, na.rm=TRUE),
+            Predicted.SD = mean(sd.pred, na.rm = TRUE),
+            n=sum(Freq, na.rm = TRUE)) %>%
+  mutate(Predicted.SEM=Predicted.SD/sqrt(n))
+
+hosmer_test <- predictions %>%
+  group_by(Id) %>%
+  mutate(mean.pred.logit = mean(pred.logit),
+         mean.pred = mean(pred)) %>%
+  slice_head(prop = 0.1) %>%
+  ungroup() %>%
+  select(POMS.overall, mean.pred.logit, mean.pred)
+
+HosmerLemeshowTest(fit = hosmer_test$mean.pred,
+                   obs = hosmer_test$POMS.overall,
+                   ngr = 20)
+```
+
+## Sensitivity analysis - Rockwood Clinical Frailty Scale missing data
+
+```{r}
+source("./source files/sensitivity_Rockwood.R")
+```
+
+## Sensitivity analysis - POMSmajor and Clavien-Dindo as outcome measures
+
+```{r}
+source("./source files/sensitivity_POMSmajor_Clavien.R")
+```
+
+## Sensitivity analysis - Gastrointestinal POMS as outcome measure
+
+```{r}
+source("./source files/sensitivity_POMS_gastrointestinal.R")
+```
+
+## Figures
+
+```{r}
+## data exploration
+source("./source files/continuous_variable_plot.R")
+
+## continuous variable plots for manuscript
+source("./source files/rcs_plots.R")
+source("./source files/data_cleaning_diagram.R")
+source("./source files/calibration_plot.R")
+```
+
+## Tables
+```{r}
+## calculate odds ratios for continuous variables needed for table 2
+source("./source files/odds_ratio_calculations.R")
+```
+
+## Check calculations made from model equation in manuscript match those made within R environment
+```{r}
+source("./source files/prediction_check.R")
+```
+
+

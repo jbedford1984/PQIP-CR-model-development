@@ -3,7 +3,8 @@
 .Rapp.history
 
 # Session Data files
-.RData
+*.RData
+*.Rproj
 
 # Example code in package build process
 *-Ex.R
@@ -34,3 +35,23 @@ vignettes/*.pdf
 
 # Shiny token, see https://shiny.rstudio.com/articles/shinyapps.html
 rsconnect/
+
+*.csv
+*.xlsx
+*.xls
+*.doc
+*.docx
+*.DS_store
+*.html
+*.rdf
+*.eps
+*.png
+*.jpg
+*.txt
+*.zip
+*.pdf
+source files/BMI_correction.R
+source files/data_linkage_postcode.R
+source files/data_linkage_postcode_cs.R
+source files/prediction_check.R
+
