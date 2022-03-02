@@ -310,12 +310,16 @@ summary_variable_POMS_numerical <- function(data, variable, breaks) {
   
     tab <- mice::complete(data, "long") %>%
       as_tibble(.) %>%
-      select({{variable}}, POMS.overall) %>%
+      select({{variable}}, POMS.overall, LengthOfStay) %>%
+      mutate(LengthOfStay == ifelse(LengthOfStay == 999, NA, LengthOfStay)) %>%
       mutate(cuts = cut({{variable}}, breaks = breaks),
              n = 1) %>%
       group_by(cuts) %>%
       summarise(POMS.n = sum(POMS.overall)/10,
-                n = sum(n)/10) %>%
+                n = sum(n)/10,
+                median.LOS = paste0(median(LengthOfStay, na.rm = TRUE), " - IQR ", quantile(LengthOfStay, 0.25, na.rm = TRUE), "-",
+                                    quantile(LengthOfStay, 0.75, na.rm = TRUE)),
+                mean.LOS = paste0(round(mean(LengthOfStay, na.rm = TRUE),1), " +/- SD ", round(SD(LengthOfStay, na.rm = TRUE),1))) %>%
       mutate(perc = round(n/sum(n)*100,3),
              perc.POMS = round(POMS.n/n*100,3))
   
@@ -326,11 +330,15 @@ summary_variable_POMS_factor <- function(data, variable) {
   
   tab <- mice::complete(data, "long") %>%
     as_tibble(.) %>%
-    select({{variable}}, POMS.overall) %>%
+    select({{variable}}, POMS.overall, LengthOfStay) %>%
+    mutate(LengthOfStay == ifelse(LengthOfStay == 999, NA, LengthOfStay)) %>%
     mutate(n = 1) %>%
     group_by({{variable}}) %>%
     summarise(POMS.n = sum(POMS.overall)/10,
-              n = sum(n)/10) %>%
+              n = sum(n)/10,
+              median.LOS = paste0(median(LengthOfStay, na.rm = TRUE), " - IQR ", quantile(LengthOfStay, 0.25, na.rm = TRUE), "-",
+                                  quantile(LengthOfStay, 0.75, na.rm = TRUE)),
+              mean.LOS = paste0(round(mean(LengthOfStay, na.rm = TRUE),1), " +/- SD ", round(SD(LengthOfStay, na.rm = TRUE),1)))  %>%
     mutate(perc = round(n/sum(n)*100,3),
            perc.POMS = round(POMS.n/n*100,3))
   

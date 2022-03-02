@@ -874,6 +874,11 @@ mids_data <- complete(mids_data, action = "long", include = TRUE) %>%
 
 ```{r}
 ## create summary statistics of dataframe for table 1
+## add LOS column to dataframe
+mids_data <- complete(mids_data, action = "long", include = TRUE) %>%
+  mutate(LengthOfStay = rep(export_data$LengthOfStay, 11)) %>%
+  as.mids(.) 
+
 summary_table_Age <- summary_variable_POMS_numerical(mids_data, S01AgeYears, 
                                            breaks = c(-Inf,39,49,59,69,79,Inf))
 summary_table_Age
@@ -914,7 +919,8 @@ summary_table_Urea
 
 summary_table_creatinine <- complete(mids_data, "long") %>%
   as_tibble() %>%
-  select(S01Gender, log.Creatinine, POMS.overall) %>%
+  select(S01Gender, log.Creatinine, POMS.overall, LengthOfStay) %>%
+  mutate(LengthOfStay == ifelse(LengthOfStay == 999, NA, LengthOfStay)) %>%
   mutate(creat_level = ifelse(S01Gender == "M" & log.Creatinine < log(59), 
                               "low",
                               ifelse(S01Gender == "F" & log.Creatinine < log(45), 
@@ -927,7 +933,12 @@ summary_table_creatinine <- complete(mids_data, "long") %>%
          n=1) %>%
     group_by(creat_level) %>%
     summarise(POMS.n = sum(POMS.overall)/10,
-              n = sum(n)/10) %>%
+                n = sum(n)/10,
+                median.LOS = paste0(median(LengthOfStay, na.rm = TRUE), " - IQR ", 
+                                    quantile(LengthOfStay, 0.25, na.rm = TRUE), "-",
+                                    quantile(LengthOfStay, 0.75, na.rm = TRUE)),
+                mean.LOS = paste0(round(mean(LengthOfStay, na.rm = TRUE),1), " +/- SD ",
+                                  round(SD(LengthOfStay, na.rm = TRUE),1))) %>%
     mutate(perc = round(n/sum(n)*100,3),
            perc.POMS = round(POMS.n/n*100,3))
   
