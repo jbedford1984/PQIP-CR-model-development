@@ -26,10 +26,10 @@ calibration_data_PQIPmodel = predictions %>%
 calibration_data <- rbind.data.frame(calibration_data, calibration_data_PQIPmodel) %>%
   as_tibble(.) %>%
   mutate(model = dplyr::recode(model, 
-                               `PQIP_model` = "Our model (PQIP)",
+                               `PQIP_model` = "PQIP-CR model",
                                `POSSUM.morbidity.intercept_slope_calibrated` = "POSSUM morbidity",
                                `SORT.morbidity.intercept_slope_calibrated` = "SORT morbidity"),
-         model = ordered(model, levels = c("Our model (PQIP)", "POSSUM morbidity","SORT morbidity")),
+         model = ordered(model, levels = c("PQIP-CR model", "POSSUM morbidity","SORT morbidity")),
          Observed = Observed*100,
          Predicted = Predicted*100)
 ## ==================================================

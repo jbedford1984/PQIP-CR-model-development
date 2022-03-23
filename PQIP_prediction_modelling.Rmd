@@ -659,8 +659,9 @@ export_data <- export_data %>%
 ```
 
 #### Sensitivity analysis
-1.  Rockwood frailty scoring - run analysis based on data after introduction of Rockwood frailty scoring where missingness is lower    
-2. POMSmajor/Clavien-Dindo grade II and above complication as outcome measure
+1. Rockwood frailty scoring - run analysis based on data after introduction of Rockwood frailty scoring where missingness is lower    
+2. Homogenous outcome measure - gastrointestinal POMS  
+3. Multilevel model incorporating random intercept for hospital site
 
 
 ## Multiple imputation
@@ -680,6 +681,8 @@ ci_auc_SORT <- ci.auc(auc_SORT, method = "bootstrap")
 auc_POSSUM <- roc(export_data$POMS.overall, export_data$POSSUM.morbidity.intercept_slope_calibrated)
 set.seed(15092021)
 ci_auc_POSSUM <- ci.auc(auc_POSSUM, method = "bootstrap")
+
+roc.test(auc_SORT, auc_POSSUM, method = "bootstrap")
 
 POMS_summary <- export_data %>% select(POMS.overall, POMS.major, ClavienGradeIIabove) %>%
   mutate(n = 1) %>%
@@ -878,6 +881,12 @@ mids_data <- complete(mids_data, action = "long", include = TRUE) %>%
 mids_data <- complete(mids_data, action = "long", include = TRUE) %>%
   mutate(LengthOfStay = rep(export_data$LengthOfStay, 11)) %>%
   as.mids(.) 
+
+median_LOS <- complete(mids_data, action = "long", include = TRUE) %>%
+  mutate(LengthOfStay = ifelse(LengthOfStay == 999, NA, LengthOfStay)) %>%
+  summarise(median.LOS = median(LengthOfStay, na.rm = TRUE),
+            IQR.25 = quantile(LengthOfStay, 0.25, na.rm=TRUE),
+            IQR.75 = quantile(LengthOfStay, 0.75, na.rm=TRUE))
 
 summary_table_Age <- summary_variable_POMS_numerical(mids_data, S01AgeYears, 
                                            breaks = c(-Inf,39,49,59,69,79,Inf))
@@ -1504,7 +1513,7 @@ predictions <- predictions %>%
   mutate(Id = rep(1:nrow(export_data),10))
 
 
-Predicted = predictions %>%
+Predicted <- predictions %>%
   group_by(Id) %>%
   mutate(mean.pred.logit = mean(pred.logit),
          mean.pred = mean(pred),
@@ -1534,6 +1543,29 @@ hosmer_test <- predictions %>%
 HosmerLemeshowTest(fit = hosmer_test$mean.pred,
                    obs = hosmer_test$POMS.overall,
                    ngr = 20)
+
+
+auc_PQIP_CR <- predictions %>%
+  group_by(Id) %>%
+  mutate(mean.pred.logit = mean(pred.logit),
+         mean.pred = mean(pred),
+         sd.pred = sd(pred)) %>%
+  slice_head(prop = 0.1) %>%
+  ungroup() %>%
+  select(POMS.overall, mean.pred)
+
+
+  
+## Calculate ROC for PQIP-CR model
+auc_PQIP_CR <- roc(auc_PQIP_CR$POMS.overall, auc_PQIP_CR$mean.pred)
+
+# Test difference between ROC curves between PQIP-CR, POSSUM and SORT models (recalibrated)
+set.seed(23032022)
+roc.test(auc_PQIP_CR, auc_SORT, method = "bootstrap")
+
+set.seed(23032022)
+roc.test(auc_PQIP_CR, auc_POSSUM, method = "bootstrap")
+
 ```
 
 ## Sensitivity analysis - Rockwood Clinical Frailty Scale missing data
