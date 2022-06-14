@@ -46,3 +46,68 @@ extract_fits_validate <- function(mids.object, M, model, seed) {
   
   return(validation_list)
 }
+
+
+validation_calculations <- function(validation_data, original_mids_object, model) {
+  
+  temp_data <- rbind.data.frame(tibble(validation_data$validation_m1$mids_validate),
+                                tibble(validation_data$validation_m2$mids_validate),
+                                tibble(validation_data$validation_m3$mids_validate),
+                                tibble(validation_data$validation_m4$mids_validate),
+                                tibble(validation_data$validation_m5$mids_validate),
+                                tibble(validation_data$validation_m6$mids_validate),
+                                tibble(validation_data$validation_m7$mids_validate),
+                                tibble(validation_data$validation_m8$mids_validate),
+                                tibble(validation_data$validation_m9$mids_validate),
+                                tibble(validation_data$validation_m10$mids_validate)) %>%
+    mutate(c_statistic_training = 0.5*(Dxy_training+1),
+           c_statistic_test = 0.5*(Dxy_test+1),
+           c_statistic_optimism = c_statistic_training-c_statistic_test,
+           slope_optimism = Slope_training - Slope_test,
+           slope_index_corrected = 1-slope_optimism,
+           intercept_optimism = Intercept_training - Intercept_test,
+           intercept_index_corrected = 0-intercept_optimism,
+           Brier_optimism = B_training - B_test,
+           R2_optimism = R2_training - R2_test)
+  
+  imp.c_stat <- list()
+  imp.R2 <- list()
+  imp.Brier <- list()
+  
+  for (i in 1:10) {
+    model.fit <- lrm(model, data=complete(original_mids_object,i))
+    name <- paste0('imp.',i)
+    imp.c_stat[name] <- model.fit$stats[6]
+    imp.R2[name] <- model.fit$stats[10]
+    imp.Brier[name] <- model.fit$stats[11]
+  }
+  
+  imp.c_stat <- cbind.data.frame(tibble(matrix(unlist(imp.c_stat))),
+                                 tibble(matrix(unlist(imp.R2))),
+                                 tibble(matrix(unlist(imp.Brier)))) %>%
+    mutate(.imp = 1:10) %>%
+    dplyr::rename(.,
+                  original_c_statistic = `matrix(unlist(imp.c_stat))`,
+                  original_Brier = `matrix(unlist(imp.Brier))`,
+                  original_R2 = `matrix(unlist(imp.R2))`)
+  
+  
+  temp_data <- left_join(temp_data, imp.c_stat, by = ".imp") %>%
+    mutate(original_c_stat = c_statistic_training,
+           optimism_corrected_c_stat = original_c_statistic-c_statistic_optimism,
+           optimism_corrected_brier = original_Brier - Brier_optimism,
+           optimism_corrected_R2 = original_R2 - R2_optimism) %>%
+    group_by(.imp) %>%
+    mutate(mean_original_c_stat = mean(original_c_stat),
+           mean_c_stat_imp = mean(optimism_corrected_c_stat),
+           mean_Brier_imp = mean(optimism_corrected_brier)) %>%
+    ungroup() %>%
+    mutate(original_c_stat_SE = original_c_stat - mean_original_c_stat,
+           original_c_stat_SE.sq = (original_c_stat - mean_original_c_stat)^2,
+           c_stat_SE.sq = (optimism_corrected_c_stat - mean_c_stat_imp)^2,
+           c_stat_SE = optimism_corrected_c_stat - mean_c_stat_imp,
+           Brier_SE.sq = (optimism_corrected_brier-mean_Brier_imp)^2,
+           Brier_SE = optimism_corrected_brier-mean_Brier_imp)
+  
+  
+}

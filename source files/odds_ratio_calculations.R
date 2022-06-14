@@ -76,7 +76,7 @@ row_names_Clavien <- c("S01BMI.centred", "Odds_ratio_bmi",
                          "IMD_quintile_adjusted - 2:5 - least deprived", "Odds_ratio",
                          "IMD_quintile_adjusted - 1 - most deprived:5 - least deprived","Odds_ratio")
 
-age.reference <- 50
+age.reference <- 30
 OR.age <- function(age.adj, model, rowNames) { 
   
   row_names <- rowNames

@@ -191,12 +191,12 @@ export_data = export_data %>% mutate(Pulmonary.overall=S06PatientHasNewRequireme
 
 ## Create columns for Clavie-Dindo grading of surgical complications
 export_data <- export_data %>% 
-  replace_na(list(S07GradeLevelOfComplicationsNone="2", S07GradeLevelOfComplicationsGradeI="2", 
-                  S07GradeLevelOfComplicationsGradeII="2", S07GradeLevelOfComplicationsGradeIIIA="2", 
-                  S07GradeLevelOfComplicationsGradeIIIB="2",
-                  S07GradeLevelOfComplicationsGradeIVA="2", 
-                  S07GradeLevelOfComplicationsGradeIVB="2",
-                  S07GradeLevelOfComplicationsGradeV="2")) %>% 
+  replace_na(list(S07GradeLevelOfComplicationsNone=2, S07GradeLevelOfComplicationsGradeI=2, 
+                  S07GradeLevelOfComplicationsGradeII=2, S07GradeLevelOfComplicationsGradeIIIA=2, 
+                  S07GradeLevelOfComplicationsGradeIIIB=2,
+                  S07GradeLevelOfComplicationsGradeIVA=2, 
+                  S07GradeLevelOfComplicationsGradeIVB=2,
+                  S07GradeLevelOfComplicationsGradeV=2)) %>% 
   mutate(ClavienGradeIIabove = S07GradeLevelOfComplicationsGradeII==1 |
            S07GradeLevelOfComplicationsGradeIIIA == 1 | 
            S07GradeLevelOfComplicationsGradeIIIB == 1 | 

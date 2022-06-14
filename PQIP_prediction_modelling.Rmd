@@ -45,6 +45,7 @@ export_data <- left_join(export_data, admission_data, by = c("CaseId" = "Referen
 # Filter to locked records only
 source("./source files/data cleaning.R")
 source("./source files/data_cleaning_2.R")
+source("./source files/table2.R")
 ```
 
 ```{r}
@@ -892,6 +893,10 @@ summary_table_Age <- summary_variable_POMS_numerical(mids_data, S01AgeYears,
                                            breaks = c(-Inf,39,49,59,69,79,Inf))
 summary_table_Age
 
+summary_Age <- paste0(mean(complete(mids_data, action = "long", include = FALSE)$S01AgeYears),
+                       " (SD ", sd(complete(mids_data, action = "long", include = FALSE)$S01AgeYears), ")")
+
+
 summary_table_Sex <- summary_variable_POMS_factor(mids_data, S01Gender)
 summary_table_Sex
 
@@ -914,6 +919,11 @@ summary_table_BMI <- summary_variable_POMS_numerical(mids_data, S01BMI,
                                            breaks = c(-Inf,18.49,24.9,29.9,39.9,Inf))
 summary_table_BMI
 
+Desc(complete(mids_data, action = "long", include = FALSE)$S01BMI)
+
+summary_BMI <- paste0(round(mean(complete(mids_data, action = "long", include = FALSE)$S01BMI),1),
+                       " (SD ", round(sd(complete(mids_data, action = "long", include = FALSE)$S01BMI),1),")")
+
 summary_table_Sodium <- summary_variable_POMS_numerical(mids_data, S02SerumSodium, 
                                            breaks = c(-Inf,133,146,Inf))
 summary_table_Sodium
@@ -926,6 +936,10 @@ summary_table_Urea <- summary_variable_POMS_numerical(mids_data, log.Urea,
                                            breaks = c(-Inf,log(2.5),log(7.8),Inf))
 summary_table_Urea
 
+Desc(exp(complete(mids_data, action = "long", include = FALSE)$log.Urea))
+summary_Urea <- paste0(exp(median(complete(mids_data, action = "long", include = FALSE)$log.Urea)),
+                       " (IQR ", exp(quantile(complete(mids_data, action = "long", include = FALSE)$log.Urea, 0.25)), "-", exp(quantile(complete(mids_data, action = "long", include = FALSE)$log.Urea, 0.75)), " [range ", exp(min(complete(mids_data, action = "long", include = FALSE)$log.Urea)), "-", exp(max(complete(mids_data, action = "long", include = FALSE)$log.Urea)),"])")
+  
 summary_table_creatinine <- complete(mids_data, "long") %>%
   as_tibble() %>%
   select(S01Gender, log.Creatinine, POMS.overall, LengthOfStay) %>%
@@ -950,11 +964,18 @@ summary_table_creatinine <- complete(mids_data, "long") %>%
                                   round(SD(LengthOfStay, na.rm = TRUE),1))) %>%
     mutate(perc = round(n/sum(n)*100,3),
            perc.POMS = round(POMS.n/n*100,3))
+
+summary_creatinine <- summary_Urea <- paste0(exp(median(complete(mids_data, action = "long", include = FALSE)$log.Creatinine)),
+                       " (IQR ", exp(quantile(complete(mids_data, action = "long", include = FALSE)$log.Creatinine, 0.25)), "-", exp(quantile(complete(mids_data, action = "long", include = FALSE)$log.Creatinine, 0.75)), " [range ", exp(min(complete(mids_data, action = "long", include = FALSE)$log.Creatinine)), "-", exp(max(complete(mids_data, action = "long", include = FALSE)$log.Creatinine)),"])")
   
 
-summary_table_WCC<- summary_variable_POMS_numerical(mids_data, S02WhiteCellCount, 
+summary_table_WCC <- summary_variable_POMS_numerical(mids_data, S02WhiteCellCount, 
                                            breaks = c(-Inf,3.6,11.0,Inf))
 summary_table_WCC
+
+Desc(complete(mids_data, action = "long", include = FALSE)$S02WhiteCellCount)
+summary_WCC <- paste0(round(median(complete(mids_data, action = "long", include = FALSE)$S02WhiteCellCount),1),
+                       " (IQR ", round(quantile(complete(mids_data, action = "long", include = FALSE)$S02WhiteCellCount, 0.25),1), "-", round(quantile(complete(mids_data, action = "long", include = FALSE)$S02WhiteCellCount, 0.75),1), " [range ", round(min(complete(mids_data, action = "long", include = FALSE)$S02WhiteCellCount),1), "-", round(max(complete(mids_data, action = "long", include = FALSE)$S02WhiteCellCount),1),"])")
 
 summary_table_Albumin<- summary_variable_POMS_numerical(mids_data, S02SerumAlbumin, 
                                            breaks = c(-Inf,35,50,Inf))

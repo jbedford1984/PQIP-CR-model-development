@@ -183,7 +183,7 @@ gen.POSSUM <- function(x){
 
 POSSUM.SORT.calculation = function(data) {
 
-  POSSUM.SORT_data <- data %>% 
+  POSSUM_data <- data %>% 
     drop_na(S01AgeYears,S02CardiacHistoryFindings,S02RespiratoryHistoryFindings,S02SystolicBP,
             S02PulseRate, S02GlasgowComaScaleTotal, S02Haemoglobin, S02WhiteCellCount, S02SerumUrea,
             S02SerumSodium,S02SerumPotassium,S02ECGFindings,S03HowManyOperationsInPast30Days,S03BloodLoss,
@@ -224,6 +224,9 @@ POSSUM.SORT.calculation = function(data) {
   gen.POSSUM(.) %>%
   mutate(POSSUM.morbidity=exp(POSSUMLogit) / (1 + exp(POSSUMLogit)),
          PPOSSUM.mortality=exp(pPOSSUMLogit) / (1 + exp(pPOSSUMLogit))) %>%
+    dplyr::select(CaseId, PhysScore, OpScore, POSSUMLogit, POSSUM.morbidity, PPOSSUM.mortality)
+  
+  SORT_data <- data %>%
   mutate(SORT_Logit_Score = (- 3.228 +
                                (S02PatientsASAGrade == "II") * 0.332 +
                                (S02PatientsASAGrade == "III") * 1.140 + 
@@ -255,11 +258,12 @@ POSSUM.SORT.calculation = function(data) {
                                                 `Min` = "Min/Int/Maj",
                                                 `Int` = "Min/Int/Maj",
                                                 `Maj` = "Min/Int/Maj")) %>%
-  dplyr::select(CaseId, PhysScore, OpScore, POSSUMLogit, POSSUM.morbidity, PPOSSUM.mortality,
+  dplyr::select(CaseId,
                 SORT.Age, SORT.ASA, SORT.severity, SORT_Logit_Score, SORT_Logit_Score.POMSmajor, POMS_SORT, POMSminor.SORT, POMSmajor.SORT)
   
   
-  POSSUM.SORT_data = left_join(data, POSSUM.SORT_data, by="CaseId")
+  POSSUM.SORT_data = left_join(data, POSSUM_data, by="CaseId") 
+  POSSUM.SORT_data = left_join(POSSUM.SORT_data, SORT_data, by="CaseId") 
   
   POSSUM.int_calibration.model <- glm(POMS.overall ~ POSSUMLogit, data = POSSUM.SORT_data, family = "binomial")
   SORT.int_calibration.model <- glm(POMS.overall ~ SORT_Logit_Score, data = POSSUM.SORT_data, family = "binomial") 
