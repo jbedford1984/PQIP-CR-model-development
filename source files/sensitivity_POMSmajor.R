@@ -68,6 +68,14 @@ lrm.mult.impute.POMSmajor <- fit.mult.impute(formula = POMS.major ~
                                                        xtrans = calibration_data_sensitivity_POMSmajor, fitter = lrm,
                                                        x=TRUE, y=TRUE)
 
+POMSmajor.fit <- with(calibration_data_sensitivity_POMSmajor, 
+                      glm(POMS.major ~ POMS.logit, 
+                                       family = "binomial"))
+
+# model estimates on log odds scale
+pool(POMSmajor.fit)
+
+
 perf.POMSmajor <- pool_performance(data=complete(calibration_data_sensitivity_POMSmajor, action = "long", include = FALSE), 
                                              nimp=10,
                                              impvar=".imp", 
@@ -86,12 +94,6 @@ POMS_major_data <- validation_calculations(validation_data = POMS_major_validate
 mean(POMS_major_data$optimism_corrected_c_stat)
 mean(POMS_major_data$slope_index_corrected)
 mean(POMS_major_data$intercept_optimism)
-
-perf.POMSmajor <- pool_performance(data=complete(calibration_data_sensitivity_POMSmajor, action = "long", include = FALSE), 
-                                             nimp=10,
-                                             impvar=".imp", 
-                                             Outcome = "POMS.major", predictors = c("POMS.logit"), 
-                                             cal.plot=TRUE, plot.indiv=TRUE, groups_cal = 15)
 
 # create datatable of model discrimination across imputed datasets, prior to pooling using the pool_auc function
 c_stat_data_POMSmajor <- POMS_major_data %>%
