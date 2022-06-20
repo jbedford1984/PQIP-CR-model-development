@@ -5,22 +5,24 @@
 
 ## 'data' is a dataframe that should contain the following columns:
 ## ModeSurgery = mode of surgery, factor, 'Opn' = open, 'Rob' = robotic, 'Lap' = laparoscopic
-## Rockwood = Rockwood clinical frailty scale, factor, 1,2,3,4,5,or 6-9
+## Rockwood = Rockwood clinical frailty scale, factor, '1','2','3','4','5',or '6-9'
 ## Sex, factor, 'F' = female, 'M' = male
 ## SORT_severity = AXA/SORT severity of surgery grading, factor, 'Min/Int/Maj' = Minor, intermediate or major
 ### 'Xma' = Xmajor, 'Com' = complex
-## ASA = ASA grade, factor, `I`=1,`II`=2,`III`=3, `IV/V`= 4 or 5
+## ASA = ASA grade, factor, 'I'=1,'II'=2,'III'=3, 'IV/V'= 4 or 5
 ## BMI - body mass index, (kg/m2), numerical 
-## Sodium - serum sodium (mmol/),  numerical
-## IMD_quintile = IMD quintile based on lookup table available in data file in repository, factor, 
-### `1 - least deprived`, `2`, `3`, `4`, `5 - most deprived`
+## Sodium - serum sodium (mmol/L),  numerical
+## IMD_quintile = IMD quintile based on Postcode, using lookup table available in data file in repository, factor, 
+### '1 - least deprived', '2', '3', '4', '5 - most deprived'
 ## Creatinine = serum creatinine, umol/L, numerical
 ## WhiteCellCount = white cell count, x10^9/L, numerical
 ## Urea = serum urea, mmol/L, numerical
 ## Age = age (years), numerical
 
+## dataframe rows should correspond to individual patients
 
 PQIP_CR_risk_calculation <- function(data) {
+  require(tidyverse)
   
   data <- data %>%
     mutate(BMI.centred = BMI-28,
