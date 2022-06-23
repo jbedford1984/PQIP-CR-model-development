@@ -56,5 +56,5 @@ source files/data_linkage_postcode_cs.R
 source files/prediction_check.R
 source files/F_score_calculation.R
 
-!data/Postcode_IMD_lookup_table.csv
+!data/postcode_adjusted_IMD_lookup.csv
 
