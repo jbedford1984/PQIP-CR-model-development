@@ -55,6 +55,10 @@ source files/data_linkage_postcode.R
 source files/data_linkage_postcode_cs.R
 source files/prediction_check.R
 source files/F_score_calculation.R
+source files/additional_calibration_plots.R
+source files/SQL_translation.R
+source files/additional_calibration_plots.R
+source files/calibration_plot.R
 
 !data/postcode_adjusted_IMD_lookup.csv
 
