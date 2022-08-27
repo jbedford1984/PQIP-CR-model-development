@@ -264,7 +264,7 @@ calibration_data_POMSmajor <- complete(calibration_data_sensitivity_POMSmajor, "
 ## ==================================================
 ## ggplot calibration object
 ## ==================================================
-fig_calibration_POMSmajor <- ggplot(calibration_data_POMSmajor %>%
+fig_calibration_Clavien <- ggplot(calibration_data_POMSmajor %>%
                                       filter(outcome_predicted == "Clavien-Dindo Grade II and above"), 
                                     aes(x=Predicted, y=Observed,
                                         shape = outcome_predicted, colour = outcome_predicted)) +
@@ -279,6 +279,6 @@ fig_calibration_POMSmajor <- ggplot(calibration_data_POMSmajor %>%
   facet_wrap(~outcome_predicted) +
   theme(legend.position = "none")
 
-#ggsave(filename = "./figures/Appendix S8 - Calibration_plot_POMSmajor_sensitivity.eps", plot = fig_calibration_POMSmajor, dpi = 400, width = 100, height = 100, units = "mm", device = cairo_ps)
+#ggsave(filename = "./figures/Appendix S8 - Calibration_plot_Clavien_sensitivity.eps", plot = fig_calibration_Clavien, dpi = 400, width = 100, height = 100, units = "mm", device = cairo_ps)
 
 

@@ -1565,20 +1565,9 @@ HosmerLemeshowTest(fit = hosmer_test$mean.pred,
                    obs = hosmer_test$POMS.overall,
                    ngr = 20)
 
-
-auc_PQIP_CR <- predictions %>%
-  group_by(Id) %>%
-  mutate(mean.pred.logit = mean(pred.logit),
-         mean.pred = mean(pred),
-         sd.pred = sd(pred)) %>%
-  slice_head(prop = 0.1) %>%
-  ungroup() %>%
-  select(POMS.overall, mean.pred)
-
-
-  
 ## Calculate ROC for PQIP-CR model
-auc_PQIP_CR <- roc(auc_PQIP_CR$POMS.overall, auc_PQIP_CR$mean.pred)
+auc_PQIP_CR <- roc(predictions$POMS.overall, predictions$pred)
+
 
 # Test difference between ROC curves between PQIP-CR, POSSUM and SORT models (recalibrated)
 set.seed(23032022)
@@ -1598,7 +1587,7 @@ source("./source files/sensitivity_Rockwood.R")
 ## Sensitivity analysis - POMSmajor and Clavien-Dindo as outcome measures
 
 ```{r}
-source("./source files/sensitivity_POMSmajor_Clavien.R")
+source("./source files/sensitivity_POMSmajor.R")
 ```
 
 ## Sensitivity analysis - Gastrointestinal POMS as outcome measure
